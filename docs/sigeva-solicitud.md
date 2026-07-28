@@ -110,11 +110,30 @@ Sin esto, aparece el error **"la suma de los porcentajes debe ser igual a 100%"*
 el porcentaje diga 100: el servidor descarta la fila porque ninguna entidad quedó
 marcada como ejecutora.
 
-### 2. Las instituciones no se pueden inyectar
+### 2. Las instituciones casi nunca se pueden inyectar
 
 En el Banco de Datos, escribir los `input[type=hidden]` de la filiación funciona (ver
-`sigeva-interno.md`). En las pantallas de solicitud, **no**: el servidor sólo reconoce la
-entidad si pasó por `buscarOrganizacion.do`. Hay que hacer el ida y vuelta real.
+`sigeva-interno.md`). En las pantallas de solicitud, en general **no**: el servidor sólo
+reconoce la entidad si pasó por `buscarOrganizacion.do`. Hay que hacer el ida y vuelta
+real.
+
+La excepción son las pantallas de **Formación de RRHH** (`formacionTesis.do`,
+`formacionBecario.do`), donde alcanza con escribir el par de campos y guardar:
+
+```js
+f.elements['organizacionTrabajoId'].value = '21005';
+f.elements['organizacionTrabajoLabel'].value = 'Universität des Saarlandes';
+```
+
+Con eso se carga un tesista en un solo `evaluate`, sin abrir el buscador. Los códigos son
+los mismos que devuelve `buscarOrganizacion.do`, así que conviene anotarlos la primera vez
+que los buscás a mano: son jerárquicos (`01560-01581` para la FCEFyN de la UNC) o planos
+(`21005` Saarland, `23752` Politecnico di Torino, `25576` Inria, `20402` Universidad de
+Chile, `12897` CONAE).
+
+Y ojo con el catálogo: **no todas las instituciones existen**. INSA Lyon, por ejemplo, no
+figura entre las francesas, así que hay que elegir la más cercana que sí esté o pedir el
+alta por mail a `lugardetrabajo@conicet.gov.ar`.
 
 Y ese ida y vuelta **borra los checkboxes y los porcentajes** del formulario. El orden
 que funciona es:
@@ -176,6 +195,84 @@ pero no de forma sincrónica: hay que soltar el hilo antes de poder asignarle va
 `tipoOtraOrganizacion` se repuebla cuando cambia `pais`; asignarlo con `.value` en la
 misma función deja el campo vacío. Hay que usar la API del driver, que espera.
 
+**Un `.click()` en Guardar no garantiza que se haya enviado.** Si leés el `value` del
+textarea inmediatamente después del click, ves tu texto, porque la navegación todavía no
+ocurrió; si el submit se perdió, el dato nunca llegó al servidor y no te enterás. La única
+verificación válida es **recargar la pantalla y volver a leer el campo**. Me pasó de dar
+por guardado un cambio que no había entrado, y sólo apareció al comparar el PDF.
+
+**Editar los autores de un artículo ya cargado crea una copia, no modifica el original.**
+La tabla de autores (`autorTable`) se deja editar sin problemas: el botón `autorNuevo`
+agrega filas, el nombre es texto libre y la institución se elige del autocompletado sin
+recargar la página:
+
+```js
+const ac = $(inp).data('ui-autocomplete');
+inp.value = 'POLITECNICO'; ac.search('POLITECNICO');
+// esperar la respuesta, buscar el item por it.value y después:
+ac.options.select.call(inp, $.Event('autocompleteselect'), {item: target});
+```
+
+El orden se arregla con las flechitas `img[name="arrowDown"]`, y `preSubmit()` arma bien el
+`autorJSON` con los siete participantes y sus filiaciones. El POST sale completo. Y aun así
+**el registro original queda igual y aparece un registro nuevo con los autores puestos**.
+Pasa en el rol de presentación y en el de banco de datos por igual.
+
+O sea que cada intento suma un duplicado. Si probaste seis veces, tenés seis copias del
+mismo paper inflando el conteo de publicaciones. Se borran desde `action=Borrar`, que lleva
+a una pantalla de confirmación con botón **Eliminar** (el GET solo no borra nada), pero un
+registro tildado como producción relevante se niega: *"No se puede eliminar esta producción
+porque ha sido marcada como producción más relevante"*, y esa marca puede quedar pegada aun
+después de destildarlo.
+
+Conclusión práctica: **verificá el conteo de la pantalla antes y después de tocar autores**,
+y si tenés que corregir una autoría, hacelo de una sola vez.
+
+**Los caracteres fuera de Latin-1 se guardan como entidad HTML y el PDF los imprime
+crudos.** Una `ş` escrita en el campo de fundamentos vuelve del servidor como `&#351;` y
+sale literalmente así en la vista preliminar. Antes de dar por cerrado un texto largo:
+
+```js
+document.forms[0].elements['fundamento'].value.match(/&#?\w+;/g)
+```
+
+Lo mismo pasa con `accion=listar` en algunas pantallas: `formacionTesis.do?accion=listar`
+renderiza el formulario **sin botón Guardar**. El alta real es `accion=nuevo`.
+
+---
+
+## Bajar la vista preliminar en PDF
+
+El link "Presentación electrónica" del índice apunta a `archivoDinamico.do?tipoPdf=3`, que
+no devuelve el PDF: arma una página con un `<iframe src="byteDownload.do">`. El binario
+sale de ese segundo pedido, y **depende del estado de sesión que dejó el primero**, así que
+hay que pedirlos en ese orden.
+
+`curl` con la cookie `JSESSIONID` no sirve: el WAF devuelve 403 a cualquier cosa que no
+parezca el navegador. Lo que funciona es forzar la descarga desde la propia página y
+guardarla con la API del driver:
+
+```js
+await page.goto('https://si.conicet.gov.ar/eva/archivoDinamico.do?tipoPdf=3');
+const [download] = await Promise.all([
+  page.waitForEvent('download'),
+  page.evaluate(async () => {
+    const r = await fetch('/eva/byteDownload.do', {credentials: 'include'});
+    const url = URL.createObjectURL(await r.blob());
+    const a = document.createElement('a');
+    a.href = url; a.download = 'vista-previa.pdf';
+    document.body.appendChild(a); a.click();
+  })
+]);
+await download.saveAs('/ruta/vista-previa.pdf');
+```
+
+Vale la pena generarlo **antes** de dar por terminada la carga y leerlo con
+`pdftotext -layout`. La tabla "Cantidad Registros" de las primeras páginas es la forma más
+rápida de confirmar que todo lo que cargaste quedó contado, y el texto completo revela
+cosas que la interfaz esconde: entidades HTML, numeraciones rotas, campos vacíos que el
+template imprime como `null`, y listas de autores truncadas en los registros importados.
+
 ---
 
 ## Requisitos por formulario
@@ -217,6 +314,60 @@ Lo que cada pantalla exige y no es obvio hasta que falla.
 - El campo de texto libre **"Cargo" es sólo para cuando elegís "Otro"** en el
   desplegable. Si completás los dos, el formulario recarga vacío sin decir nada.
 
+### Grupo de Actividades CyT (`grupoActividadesCYT.do`)
+
+- La **descripción tiene un máximo de 2.000 caracteres** que el formulario **no
+  declara y no valida con un mensaje**: si te pasás, guarda en silencio, recarga el
+  formulario vacío y la pantalla sigue en "Sin Datos". Es el fallo más desconcertante
+  de toda la aplicación.
+- Los campos de miembro (apellido, nombre, CUIL) son **autocompletados jQuery UI** que
+  llenan un `personaId_<n>` oculto. Escribir el CUIL a mano no sirve: el backend
+  responde "Debe seleccionar la persona con dicho cuil". Hay que **buscar por apellido**
+  y elegir de la lista.
+- **Cuidado al elegir del autocomplete**: los homónimos son frecuentes y un click por
+  texto puede caer en el equivocado. Conviene leer el item de cada `li` y disparar el
+  handler con el que corresponde:
+
+```js
+const $ = window.jQuery;
+const ac = $(input).data('ui-autocomplete');
+let target = null;
+ac.menu.element.find('li').each(function () {
+  const it = $(this).data('ui-autocomplete-item');
+  if (it && it.cuil === '20309689926') target = it;
+});
+ac.options.select.call(input, $.Event('autocompleteselect'), { item: target });
+```
+
+### Producciones más relevantes (`produccionMasRelevante.do`)
+
+- La lista sale del Banco de Datos y viene **paginada de a 10** con displaytag
+  (`d-<id>-p=N`), sin buscador. Con 186 registros son 19 páginas. Se pueden recorrer
+  con `fetch` desde la propia página y parsear con `DOMParser`, en lugar de navegar.
+- **Parseá sólo las filas que tienen `input[name="producciones"]`.** Si mirás el
+  `textContent` de todos los `<tr>`, las filas del layout externo contienen la página
+  entera y cualquier búsqueda por texto devuelve coincidencias falsas.
+- Cada checkbox tiene `onclick="actualizar(<pagina>, null, null)"`, que **envía el
+  formulario y persiste la selección en el servidor**. Por eso se puede tildar un ítem,
+  pasar a otra página y tildar otro: la selección se acumula. Pero **no combines**
+  `checked = true` con `click()`: el click togglea y termina desmarcando.
+- Para cambiar de página conservando lo tildado, llamá `actualizar(N, null, null)`.
+- **El botón Guardar de esa pantalla borra todas las selecciones.** Sólo envía los
+  checkboxes de la página visible, así que si apretás Guardar parado en una página sin
+  ítems tildados, contesta *"La cantidad de producciones seleccionadas no puede ser menor
+  a 1"* y de paso **te vacía las cinco selecciones**, que estaban bien guardadas. Cuesta
+  quince minutos rehacerlas y es fácil no darse cuenta.
+  El campo de Observaciones vive en esa misma pantalla, así que **editá el texto antes de
+  tildar las producciones**, nunca después. O editalo y verificá las cinco selecciones
+  recorriendo todas las páginas.
+- **Borrar una producción tildada también vacía las selecciones.** Y al revés: no se puede
+  borrar una producción que esté marcada como relevante (*"Desmárquela como tal y vuelva a
+  intentar"*), marca que a veces queda pegada aunque el checkbox aparezca sin tildar.
+  Después de cualquier borrado, revisá las cinco.
+- El orden de las páginas **cambia** cuando tildás, borrás o se recarga la lista. No sirve
+  memorizar en qué página estaba cada ítem: buscá por el `value` del checkbox
+  (`<tipo>-<produccionId>`) recorriendo todas las páginas.
+
 ### Participación en eventos (`participacionEvento.do`)
 
 - Al menos una **institución organizadora**.
@@ -232,22 +383,12 @@ Lo que cada pantalla exige y no es obvio hasta que falla.
 
 ---
 
-## Grupo de Actividades CyT
+## Dos pantallas con trampa propia
 
-Pantalla obligatoria y fácil de subestimar. Pide denominación, año de inicio,
-institución de radicación, tipo de actividad, descripción, campos de aplicación, área
-del conocimiento, **miembros con CUIL y rol**, y los datos de participación del
-postulante. Más **documentación de acreditación en PDF**.
+**Grupo de Actividades CyT.** Conseguir los CUIL de todos los integrantes de un
+laboratorio es poco realista. La pantalla no exige el listado completo: se puede
+declarar sólo a quienes tengas.
 
-Conseguir los CUIL de todos los integrantes de un laboratorio es poco realista. La
-pantalla no exige el listado completo: se puede declarar sólo a quienes tengas.
-
----
-
-## Producciones más relevantes
-
-Sale del Banco de Datos: hay que **terminar de cargarlo antes**. Se tildan hasta cinco
-ítems y se justifica en un textarea de 2.500 caracteres.
-
-Los `textarea` no interpretan Markdown: lo que pegues aparece literal, asteriscos
+**Producciones más relevantes.** Sale del Banco de Datos: hay que terminar de cargarlo
+antes. Los `textarea` no interpretan Markdown: lo que pegues aparece literal, asteriscos
 incluidos.
