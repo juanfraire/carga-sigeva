@@ -1,0 +1,23 @@
+{
+  "apellido": "Perez",
+  "mail_contacto": "tu.mail@ejemplo.org",
+
+  "sigeva": {
+    "base": "https://si.conicet.gov.ar",
+    "rol_banco_datos": 96
+  },
+
+  "bib": "~/cv/publicaciones.bib",
+
+  "carpetas_pdf": [
+    "~/papers",
+    "~/papers/recientes"
+  ],
+
+  "area_conocimiento": {
+    "campo": "6",
+    "subcampo": "7"
+  },
+
+  "desde_anio": 2017
+}

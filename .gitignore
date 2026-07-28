@@ -1,0 +1,10 @@
+config.json
+datos/
+.venv/
+.perfil-chromium/
+capturas/
+pdfs/
+*.pyc
+__pycache__/
+PENDIENTES.md
+FICHA-CARGA-MANUAL.md
