@@ -78,15 +78,18 @@ def main():
     mios = {"silencioso", "timeout"}
 
     total = sum(len(g["regs"]) for g in grupos.values())
+    cargables = sum(1 for r in registros
+                    if r["tipo"] in ("articulo", "evento") and not r.get("excluir"))
     out = [
         "# Pendientes de carga en SIGEVA",
         "",
-        f"{total} registros sin cargar, sobre 78 cargables. Los otros 43 ya están.",
+        f"{total} registros sin cargar, sobre {cargables} cargables. "
+        f"Los otros {cargables - total} ya están.",
         "",
-        "Generado por `sigeva-carga/pendientes.py`. Para regenerarlo:",
+        "Generado por `carga_sigeva/pendientes.py`. Para regenerarlo:",
         "",
         "```bash",
-        "cd sigeva-carga && python3 pendientes.py",
+        "cd carga_sigeva && python3 pendientes.py",
         "```",
         "",
     ]
@@ -109,7 +112,7 @@ def main():
         out.append("")
         if cat == "fulltext":
             out += [
-                "**Cómo ayudar:** dejá el PDF en `sigeva-carga/pdfs/` con el nombre "
+                "**Cómo ayudar:** dejá el PDF en `datos/pdfs/` con el nombre "
                 "que figura abajo, y el cargador lo toma solo.",
                 "",
                 "| # | Nombre de archivo esperado |",

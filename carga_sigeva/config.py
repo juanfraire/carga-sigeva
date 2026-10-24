@@ -41,9 +41,10 @@ DEFECTOS = {
     # convenciones de nombre: <clavebibtex>.pdf y <ANIO>-<Venue>-<Tema>.pdf
     "carpetas_pdf": [],
 
-    # Area del conocimiento que se declara en cada produccion. Los valores son
-    # los `value` de los combos de SIGEVA, no las etiquetas. Se averiguan
-    # abriendo el formulario y mirando el HTML del select.
+    # Area del conocimiento que se declara en cada produccion. El campo es el
+    # `value` del combo de SIGEVA; el subcampo puede ser su `value` o un trozo
+    # de su etiqueta ("Telecomunicaciones"), porque se puebla por AJAX y su
+    # value no esta en el HTML. inventariar.py los deja en datos/areas.json.
     "area_conocimiento": {
         "campo": "6",        # 1.2 Ciencias de la Computacion e Informacion
         "subcampo": "7",     # 1.2.1 Ciencias de la Computacion

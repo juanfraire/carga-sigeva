@@ -25,6 +25,19 @@ AQUI = CFG.DATOS_DIR
 SALIDA = CFG.RAIZ / "FICHA-CARGA-MANUAL.md"
 
 
+def area_legible() -> tuple:
+    """Etiquetas del area de config.json, si inventariar.py relevo los combos."""
+    campo, subcampo = CFG.AREA_CONOCIMIENTO
+    areas = AQUI / "areas.json"
+    datos = json.loads(areas.read_text(encoding="utf-8")).get("areas", {}) \
+        if areas.exists() else {}
+    c = datos.get(campo) or {}
+    subs = c.get("subcampos") or {}
+    etiqueta_sub = subs.get(subcampo) or next(
+        (t for t in subs.values() if subcampo.lower() in t.lower()), subcampo)
+    return c.get("label") or f"campo {campo}", etiqueta_sub
+
+
 def nuevas_instituciones(reg: dict, cat: Catalogo) -> list:
     return sorted({a["institucion"] for a in reg["autores"]
                    if a.get("institucion") and not cat.institucion(a["institucion"])})
@@ -101,8 +114,8 @@ def ficha(reg: dict, cat: Catalogo) -> list:
     out.append("")
 
     out += ["### Resto", "", "| Campo | Valor |", "|---|---|",
-            "| Área del conocimiento | 1.2 Ciencias de la Computación e Información |",
-            "| Subárea | 1.2.1 Ciencias de la Computación |",
+            f"| Área del conocimiento | {area_legible()[0]} |",
+            f"| Subárea | {area_legible()[1]} |",
             f"| Palabras clave | {' · '.join(C.palabras_clave(reg))} |",
             f"| Full text | `{reg.get('pdf') or 'sin PDF'}` |",
             "| Tipo de archivo | Post print |", ""]

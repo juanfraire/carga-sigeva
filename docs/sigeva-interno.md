@@ -177,6 +177,106 @@ universidad**: para una universidad extranjera la menos incorrecta es
 El catálogo es casi exclusivamente argentino, aunque tiene entradas extranjeras
 cargadas por otros usuarios.
 
+## Fechas: el datepicker pisa lo que escribís
+
+`fechaPublica`, `fechaReunion`, `anioPublica`, `anio`, `anioInicio` y
+`anioFin` son datepickers de jQuery UI (clases `calendar-year-month` y
+`calendar-year`). Su `onClose` reescribe el campo con la fecha que el widget
+tiene seleccionada:
+
+```js
+$(this).datepicker('setDate', new Date(inst.selectedYear, inst.selectedMonth, 1));
+```
+
+`fill()` cambia el texto pero no esa selección, que arranca en el mes actual:
+al perder el foco, el campo pasa a mostrar la fecha de hoy. Hay que usar la API
+del widget, que fija las dos cosas:
+
+```js
+jQuery(campo).datepicker('setDate', new Date(anio, mes - 1, 1));
+```
+
+Además, cada vuelta por el buscador de revistas o de instituciones
+re-renderiza el formulario y las fechas se vuelven a pisar. Conviene escribirlas
+al final, después de los autores, y leerlas antes de guardar.
+
+## La tabla de autores se pagina (artículos)
+
+Al volver del buscador de instituciones, el formulario de artículo muestra tres
+autores más el declarante y un control **"Ver más (4/8)"**. No es un `<button>`
+ni un `<input>`: hay que ubicarlo por texto. El *Buscar* de una fila oculta no
+se puede clickear con Playwright (espera a que se vea), pero
+`element.click()` desde JavaScript corre igual. El formulario de eventos no
+pagina.
+
+## Área del conocimiento
+
+`campo_0` trae encabezados deshabilitados con `value` negativo
+(`-3` = "2 INGENIERÍAS Y TECNOLOGÍAS"): elegir uno cuelga el `select_option`.
+`campo_0_0` se puebla por AJAX
+(`bcoProduccionListaPublicacionCongreso.do?btnSubmit=ajaxCampoDisciplinar`),
+así que su `value` no está en el HTML inicial. Ejemplo: campo `60`
+(2.2 Ingeniería Eléctrica, Ingeniería Electrónica e Ingeniería de la
+Información) → subcampo "2.2.5 Telecomunicaciones".
+
+## Países
+
+Las etiquetas de `pais`, `paisEvento` y `paisEdicion` están en castellano.
+Taiwán figura como **"República de China"**; también "Turquía", "Reino Unido",
+"Estados Unidos".
+
+## Full text: 35 MB
+
+El formulario dice "Tamaño máximo del archivo 35 (treinta y cinco) MegaBytes"
+pero no lo valida con un mensaje: con un PDF más grande, *Guardar* vuelve sin
+error y el registro no existe. Un preprint de 78 páginas con figuras bajó de
+40 MB a 6 MB con:
+
+```bash
+gs -sDEVICE=pdfwrite -dPDFSETTINGS=/printer -o chico.pdf grande.pdf
+```
+
+## Verificar después de guardar
+
+Con PDF de varios MB, la página vuelve a la lista (con un velo gris) antes de
+que termine la subida, y el registro aparece segundos después. Buscarlo en ese
+momento da un falso "no guardado", y reintentar lo duplica. Hay que esperar y
+reintentar durante un minuto. El `evaluate` también puede caer con
+*Execution context was destroyed* si la página sigue navegando.
+
+En la lista de trabajos en eventos los títulos se cortan a 50 caracteres y
+terminan en `...`.
+
+## Redes, gestión editorial y eventos
+
+Lista: `bcoRedesLista.do?idModulo=7&idGrupo=7&idMenu=1469` (menú *Otros
+antecedentes*).
+
+**Gestión editorial**: `bcoActividadEvaluacionRevista.do?tipoActividadEvaluacionId=6&accion=Nuevo`
+
+| Campo | Nombre |
+|---|---|
+| Revista | `bissn` / `brevista` + *Buscar*, o alta como otra: `botrarevista`, `botroissn`, `botroeissn`, radio `otraRevistaSeleccionada` + *Seleccionar* |
+| País / ciudad / web | `pais`, `ciudad`, `sitioWeb` |
+| Años | `anioInicio`, `anioFin` (datepicker; fin vacío = en curso) |
+| Función | `tipoFuncion`: 6 integrante del comité editorial, 57 director, 58 editor asociado, 59 jefe de redacción o secretario, 60 integrante del comité científico |
+| Dedicación | `dedicHorariaSemanal` (obligatoria) |
+| Observaciones | `observaciones` |
+
+**Participación u organización de eventos**: `bcoParticipacionEvento.do?accion=nuevo`
+
+| Campo | Nombre |
+|---|---|
+| Evento | `evento` |
+| Tipo | `tipoReunion` (4 = Workshop) |
+| Alcance | `alcanceNacional`, `alcanceInternacional` |
+| País / ciudad | `pais`, `ciudad` |
+| Año | `anio` (datepicker) |
+| Modo | `modoParticipacionChecked` (ver la tabla en `sigeva-solicitud.md`) |
+| Institución organizadora | `participacionEventoOrganizacionBuscar` + *Buscar* → `bcoBuscarOrganizacion.do` → `span.orgBuscar` → *Seleccionar* |
+
+Orden que funciona: textos, institución, y recién después checkboxes y año.
+
 ## Pantalla de solicitud
 
 Fuera del Banco de Datos, en el rol *Usuario presentación/solicitud*
