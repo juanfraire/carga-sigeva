@@ -1,7 +1,8 @@
 # SIGEVA por dentro
 
 Referencia de campos, URL e identificadores del Banco de Datos, relevados sobre
-**SIGEVA CONICET 14.11.20** entre el 27 y el 28 de julio de 2026.
+**SIGEVA CONICET 14.11.20** entre el 27 y el 28 de julio de 2026, y revisados en
+octubre de 2026 sobre 14.11.24.5 y 14.11.24.6.
 
 Todo esto se descubrió leyendo el DOM. No hay documentación oficial de la
 interfaz; los manuales del CONICET explican cómo usar la aplicación, no cómo
@@ -75,7 +76,7 @@ Formulario `cProduccionArticuloActionForm`.
 | Referato | `tipoReferato` (2 = con referato) |
 | Estado | `publicado` (1 = publicado) |
 | Soporte | `tipoSoporteChecked` (1 impreso, 2 electrónico) |
-| Autor declarante | `autorSel` (radio, índice de fila) |
+| Autor declarante | hasta 14.11.20, `autorSel` (radio, índice de fila); desde 14.11.24.5, `autorPersonaId` de su fila con el id de persona |
 | Nombre de cada autor | `autorParticipacionLabel` |
 | Resumen | `hdnresumen` (textarea) |
 | Área del conocimiento | `campo_0` → `campo_0_0` (dependiente) |
@@ -127,13 +128,27 @@ Los inputs ocultos que el backend lee al guardar, uno por filiación:
 <input type="hidden" name="autorAffiliationId" value="">
 ```
 
-Dónde insertarlos:
-
-- **Artículos**: al final del `<tbody>` de la tabla del autor.
-- **Eventos**: inmediatamente después del `<tr>` del autor (el `<tbody>` está
-  vacío porque el autor vive en un `<th>`).
+Dónde insertarlos: al final del `<tbody>` de la tabla anidada del autor, en
+artículos y en eventos. Al guardar, `preSubmit()` llama a
+`autor.participacionToJson('autor')`, que recorre `#autorTable>tbody>tr` (un
+autor por fila) y, en cada uno, las filas del `<tbody>` de su tabla anidada, y
+deja todo en `input[name=autorJSON]`. El nombre del autor está en el `<thead>`
+de esa tabla: una filiación insertada ahí, o después de la fila del autor, se ve
+en pantalla pero no viaja. En eventos el `<tbody>` puede no existir; se crea.
 
 Sólo sirve con `autorOrganizacionId` real. Ver el límite en el README.
+
+## Modificar crea una versión nueva
+
+En 14.11.24.5, **Modificar** sobre un registro no lo edita: crea uno nuevo, con
+otro `produccionId`, y saca el anterior de la lista. El enlace de edición del id
+viejo sigue abriendo el formulario con los datos viejos, y modificarlo desde ahí
+crea un segundo registro, un duplicado. Para verificar una modificación hay que
+volver a la lista y abrir el id que muestra ahora; nunca reusar el anterior.
+
+El botón de guardar del formulario de edición es `Modificar`. Un `fetch` con el
+`FormData` del formulario vuelve al formulario sin guardar; el `click()` del
+botón desde la página sí guarda.
 
 ## Buscador de instituciones
 
@@ -199,6 +214,14 @@ jQuery(campo).datepicker('setDate', new Date(anio, mes - 1, 1));
 Además, cada vuelta por el buscador de revistas o de instituciones
 re-renderiza el formulario y las fechas se vuelven a pisar. Conviene escribirlas
 al final, después de los autores, y leerlas antes de guardar.
+
+`fechaPublica` está dos veces con el mismo `name`: el campo visible y un input
+oculto. Hay que escribir los dos. Antes, cerrar cualquier datepicker abierto
+(`datepicker('hide')`) y sacar el foco, porque un picker que se cierra después
+escribe su selección encima. Así se guardaron con 07/2026 los setenta registros
+cargados en julio de 2026, sin ningún mensaje de error. Después de guardar,
+abrir el registro y comparar las fechas una por una: el año de la lista no
+distingue 07/2026 de 09/2026.
 
 ## La tabla de autores se pagina (artículos)
 

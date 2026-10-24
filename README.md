@@ -8,8 +8,8 @@ reduce a correr cuatro comandos y revisar el resultado. Cada registro queda con
 su revista o evento, autores con filiación, resumen, área del conocimiento,
 palabras clave y PDF adjunto.
 
-> **Probado únicamente en SIGEVA CONICET** (`si.conicet.gov.ar`), versión
-> 14.11.20. SIGEVA lo usan también universidades y CVar con la misma base de
+> **Probado únicamente en SIGEVA CONICET** (`si.conicet.gov.ar`), versiones
+> 14.11.20, 14.11.24.5 y 14.11.24.6. SIGEVA lo usan también universidades y CVar con la misma base de
 > código, así que es razonable que funcione en otras instancias, pero **nadie lo
 > verificó todavía**. Si lo probás en otra, contá cómo te fue en un issue.
 
@@ -69,6 +69,19 @@ python3 pdfs_hal.py            # busca los full text que falten en HAL y OpenAle
 ../.venv/bin/python cargar.py --con-pdf --perfil-limpio
 ```
 
+La segunda vez (el informe del año siguiente, otra convocatoria) es la misma
+secuencia. Lo que no hay que saltear es `inventariar.py`: `diff.py` compara
+contra esa foto, y una vieja hace que se vuelva a cargar lo que ya está.
+`estado.json`, `catalogo.json` y `datos-manuales.json` se conservan de una vez
+a la otra.
+
+Lo que ninguna fuente trae se completa en `datos/datos-manuales.json`, por
+clave bibtex: sede y fecha del evento, editorial, resumen, la lista de autores
+con filiaciones verificadas (`"verificada": true` en cada autor), o
+`"version_pdf": "preprint"` cuando el único texto completo es el de arXiv.
+Los trabajos con `note = {To appear}` en el `.bib` no se cargan: un aceptado no
+es un publicado. Entran solos cuando se saca la nota.
+
 Credenciales: por defecto abre un Chromium visible y espera a que ingreses vos.
 Para corridas desatendidas, `SIGEVA_USER` y `SIGEVA_PASS` por variable de
 entorno. **Nunca se escriben en disco.**
@@ -90,16 +103,21 @@ El diseño está sesgado a no meter datos falsos, aun a costa de cargar menos:
 
 - **Nunca inventa.** Si no encuentra la sede de un congreso, el resumen o la
   editorial, corta ese registro y lo reporta en vez de completar con algo
-  plausible.
+  plausible. La excepción es el mes de publicación: si ninguna fuente lo trae
+  usa `01/AAAA` y lo avisa como "mes estimado". Conviene corregirlo en
+  `datos-manuales.json` antes de la carga real.
 - **Verifica lo que guarda.** Después de cada alta va a buscar el registro a la
   lista. No alcanza con que no haya mensaje de error: SIGEVA puede volver del
   Guardar sin quejarse y sin haber guardado nada.
-- **No duplica.** `estado.json` es append-only y se re-verifica contra el
-  inventario antes de crear.
+- **No duplica.** `estado.json` es append-only, y antes de crear cada registro
+  lo busca en la lista viva de SIGEVA: lo cargado a mano o por otro camino no
+  está en `estado.json`.
 - **Filtra la basura de las fuentes.** OpenAlex a veces devuelve como filiación
   cosas que no son instituciones académicas, incluidos clubes deportivos; ante
   una institución dudosa deja el campo sin informar antes que afirmar algo
-  falso.
+  falso. Como resumen puede traer el relleno de HAL ("International audience")
+  o las líneas de filiación del repositorio del CONICET ("Fil: …"); esos se
+  descartan.
 - **Nunca aprieta "Enviar Presentación".** Eso lo hace la persona.
 
 ## Lo que aprendimos de SIGEVA
@@ -153,11 +171,37 @@ círculo: para guardar necesitás la institución, para crear la institución
 necesitás guardar. La salida es cargar ese registro a mano una vez; después
 `cosechar.py` levanta el ID y el resto sale automático.
 
-### Los formularios anidan distinto
+### Las fechas son datepickers que pisan lo que escribís
 
-En artículos las filiaciones van dentro del `<tbody>` de la fila del autor. En
-eventos el autor vive en un `<th>` con el `<tbody>` vacío y hay que insertarlas
-inmediatamente después de su fila. Mismo campo, misma app, distinto HTML.
+Los campos de fecha (`fechaPublica`, `fechaReunion`, `anioPublica`) son
+datepickers de jQuery UI. Al cerrarse escriben en el campo el mes y año que
+tienen *seleccionados*, que sin selección es el mes actual, y no lo que se
+tipeó. Llenarlos con `fill` (foco + tipeo) abre el picker, y al pasar al campo
+siguiente la fecha queda pisada. `fechaPublica` además está repetido como input
+oculto con el mismo `name`. Así se guardaron en julio de 2026 setenta registros
+con fecha 07/2026. `cargar.py` ahora las fija con `datepicker('setDate', …)`
+como último paso, escribe también el oculto, y después de guardar abre el
+registro y compara las fechas una por una.
+
+### Modificar no edita: crea una versión nueva
+
+En el Banco de Datos (14.11.24.5), "Modificar" sobre un registro crea otro con
+un `produccionId` nuevo y retira el anterior de la lista. El formulario del id
+viejo se sigue abriendo y muestra los datos viejos. Si se lo vuelve a modificar
+desde ahí, se crea **un segundo registro**: un duplicado. Después de cada
+Modificar, el id válido es el que muestra la lista; nunca se reusa el anterior.
+
+### Los autores viajan como JSON
+
+Al guardar, `preSubmit()` arma `autorJSON` recorriendo `#autorTable>tbody>tr`
+(un autor por fila) y, dentro de cada uno, las filiaciones de su tabla anidada
+(`tbody>tr`). El nombre del autor está en el `thead` de esa tabla anidada y las
+filiaciones van en su `tbody`, en artículos y en eventos. Una fila de filiación
+fuera del `tbody` se ve en pantalla pero no se serializa: así quedaron sin
+filiaciones los eventos cargados en julio de 2026, cuando creíamos que en
+eventos iban después de la fila del autor. Desde 14.11.24.5 el declarante ya no
+es un radio: es el autor con `autorPersonaId` igual al id de persona de quien
+carga (`sigeva.persona_id` en `config.json`).
 
 ### Validaciones que no son obvias
 
@@ -178,7 +222,10 @@ inmediatamente después de su fila. Mismo campo, misma app, distinto HTML.
 
 - El HTML se sirve en **ISO-8859-1**. Decodificarlo como UTF-8 produce
   `Cap�tulo`.
-- Paginación estilo displaytag: `d-<idTabla>-p=N` en la query string.
+- Paginación estilo displaytag: `d-<idTabla>-p=N` en la query string. Desde
+  la página 2 los enlaces de cada tabla copian la query entera, con el `-p` de
+  las demás: para saber qué tabla es cuál hay que mirar su parámetro de orden,
+  `d-<idTabla>-s=`.
 - Los títulos en las listas vienen **truncados** con `...`, así que el diff
   compara por prefijo normalizado más año, con un pase difuso de respaldo.
 - Los campos de autores se arman por JavaScript: `fetch` + parseo del HTML crudo
