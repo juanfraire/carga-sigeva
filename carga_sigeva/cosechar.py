@@ -95,15 +95,57 @@ def extraer(page) -> dict:
     }""")
 
 
+def cosechar_en(page, limit: int | None = None) -> None:
+    """Recorre las producciones en modo Editar y actualiza catalogo.json.
+
+    Recibe una pagina ya dentro del Banco de Datos, para que otro script
+    (inventariar.py) pueda reusar la misma sesion.
+    """
+    catalogo = json.loads(CATALOGO.read_text(encoding="utf-8")) if CATALOGO.exists() else {}
+    revistas = catalogo.get("revistas", {})
+    instituciones = catalogo.get("instituciones", {})
+
+    hrefs = hrefs_en_vivo(page)
+    if limit:
+        hrefs = hrefs[:limit]
+    C.log(f"{len(hrefs)} producciones a revisar (solo lectura)")
+
+    fallos = 0
+    for i, href in enumerate(hrefs, 1):
+        try:
+            page.goto(f"{C.BASE}/eva/{href}", wait_until="domcontentloaded",
+                      timeout=45_000)
+            page.wait_for_timeout(400)      # deja correr el JS que arma autores
+            d = extraer(page)
+        except PWTimeout:
+            fallos += 1
+            continue
+
+        if d["publicacionId"] and d["revista"]:
+            revistas[norm(d["revista"])] = {
+                "id": d["publicacionId"], "label": d["revista"], "issn": d["issn"]}
+        for inst in d["instituciones"]:
+            if inst["label"] and inst["id"]:
+                instituciones[norm(inst["label"])] = {
+                    "id": inst["id"], "label": inst["label"],
+                    "otra": inst["otra"] == "true"}
+
+        if i % 10 == 0 or i == len(hrefs):
+            C.log(f"  {i}/{len(hrefs)} -> {len(revistas)} revistas, "
+                  f"{len(instituciones)} instituciones")
+
+    CATALOGO.write_text(json.dumps(
+        {"revistas": revistas, "instituciones": instituciones},
+        ensure_ascii=False, indent=1), encoding="utf-8")
+    C.log(f"Listo. {len(revistas)} revistas y {len(instituciones)} instituciones "
+          f"en catalogo.json ({fallos} páginas fallaron)")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--limit", type=int, default=None)
     a = p.parse_args()
-
-    catalogo = json.loads(CATALOGO.read_text(encoding="utf-8")) if CATALOGO.exists() else {}
-    revistas = catalogo.get("revistas", {})
-    instituciones = catalogo.get("instituciones", {})
 
     with sync_playwright() as pw:
         ctx = pw.chromium.launch_persistent_context(
@@ -111,43 +153,8 @@ def main():
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         C.esperar_login(page)
         C.entrar_banco_datos(page)
-
-        hrefs = hrefs_en_vivo(page)
-        if a.limit:
-            hrefs = hrefs[:a.limit]
-        C.log(f"{len(hrefs)} producciones a revisar (solo lectura)")
-
-        fallos = 0
-        for i, href in enumerate(hrefs, 1):
-            try:
-                page.goto(f"{C.BASE}/eva/{href}", wait_until="domcontentloaded",
-                          timeout=45_000)
-                page.wait_for_timeout(400)      # deja correr el JS que arma autores
-                d = extraer(page)
-            except PWTimeout:
-                fallos += 1
-                continue
-
-            if d["publicacionId"] and d["revista"]:
-                revistas[norm(d["revista"])] = {
-                    "id": d["publicacionId"], "label": d["revista"], "issn": d["issn"]}
-            for inst in d["instituciones"]:
-                if inst["label"] and inst["id"]:
-                    instituciones[norm(inst["label"])] = {
-                        "id": inst["id"], "label": inst["label"],
-                        "otra": inst["otra"] == "true"}
-
-            if i % 10 == 0 or i == len(hrefs):
-                C.log(f"  {i}/{len(hrefs)} -> {len(revistas)} revistas, "
-                      f"{len(instituciones)} instituciones")
-
+        cosechar_en(page, a.limit)
         ctx.close()
-
-    CATALOGO.write_text(json.dumps(
-        {"revistas": revistas, "instituciones": instituciones},
-        ensure_ascii=False, indent=1), encoding="utf-8")
-    C.log(f"Listo. {len(revistas)} revistas y {len(instituciones)} instituciones "
-          f"en catalogo.json ({fallos} páginas fallaron)")
 
 
 if __name__ == "__main__":

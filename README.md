@@ -43,7 +43,10 @@ $EDITOR config.json
 
 `config.json` es lo único que hay que tocar: tu apellido, tu mail de contacto,
 la ruta del `.bib`, las carpetas donde tenés los PDF y el área del conocimiento
-que querés declarar.
+que querés declarar. El campo va por su `value`; el subcampo puede ir por
+`value` o por un trozo de su etiqueta (`"subcampo": "Telecomunicaciones"`),
+porque llega por AJAX y su `value` no está en el HTML. `inventariar.py` deja
+los valores de los dos combos en `datos/areas.json`.
 
 ## Uso
 
@@ -54,7 +57,7 @@ cd carga_sigeva
 python3 bib2registros.py
 
 # 2. Inventariar lo que YA está cargado (solo lectura) y sacar la diferencia
-python3 cosechar.py            # también arma el catálogo de IDs
+../.venv/bin/python inventariar.py   # inventario.json, catálogo de IDs y combos
 python3 diff.py
 
 # 3. Completar lo que el .bib no trae
