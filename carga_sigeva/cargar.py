@@ -13,8 +13,9 @@ la sesion ya autenticada. Nunca pide ni guarda la contrasena.
 Nunca aprieta "Enviar Presentacion": esto solo escribe en el Banco de Datos.
 
 Log append-only en estado.json para poder reanudar sin repetir. Antes de crear
-cualquier registro se re-verifica contra inventario.json: un duplicado en una
-declaracion jurada es peor que un faltante.
+cualquier registro se lo busca en la lista viva de SIGEVA: estado.json solo
+sabe lo que cargo este script, y un duplicado en una declaracion jurada es peor
+que un faltante.
 """
 
 from __future__ import annotations
@@ -87,19 +88,34 @@ def registrar(entrada: dict) -> None:
     """estado.json es append-only: permite reanudar sin recargar nada dos veces."""
     historial = json.loads(ESTADO.read_text(encoding="utf-8")) if ESTADO.exists() else []
     historial.append({**entrada, "cuando": datetime.now().isoformat(timespec="seconds")})
-    ESTADO.write_text(json.dumps(historial, ensure_ascii=False, indent=1), encoding="utf-8")
+    # se escribe aparte y se reemplaza: cortar el proceso a mitad de escritura
+    # no puede dejar el log truncado
+    tmp = ESTADO.with_suffix(".tmp")
+    tmp.write_text(json.dumps(historial, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, ESTADO)
 
 
 def ya_cargado(clave: str) -> bool:
     if not ESTADO.exists():
         return False
-    return any(e.get("clave") == clave and e.get("resultado") == "guardado"
+    return any(e.get("clave") == clave
+               and e.get("resultado") in ("guardado", "ya-estaba", "guardado-fecha-mal")
                for e in json.loads(ESTADO.read_text(encoding="utf-8")))
 
 
 def sinacentos(s: str) -> str:
     s = unicodedata.normalize("NFKD", (s or "").lower())
     return "".join(c for c in s if not unicodedata.combining(c))
+
+
+# lo que NFKD no descompone y tiene un equivalente obvio en Latin-1: sin esto
+# la 'ı' de "Yanıkömeroğlu" o las comillas y rayas de un resumen salian como '?'
+EQUIVALENTES = str.maketrans({
+    "ı": "i", "ł": "l", "Ł": "L", "đ": "d", "Đ": "D", "œ": "oe", "Œ": "OE",
+    "‘": "'", "’": "'", "‚": ",", "“": '"', "”": '"', "„": '"',
+    "‐": "-", "‑": "-", "–": "-", "—": "-", "−": "-",
+    "μ": "µ", "•": "·", "≤": "<=", "≥": ">=", "≈": "~", "∼": "~", "→": "->",
+})
 
 
 def a_latin1(s: str) -> str:
@@ -110,12 +126,21 @@ def a_latin1(s: str) -> str:
     'ü' entra; la 'ş' pasa a 's'.
     """
     out = []
-    for c in s or "":
+    s = (s or "").translate(EQUIVALENTES)
+    for i, c in enumerate(s):
         try:
             c.encode("latin-1")
             out.append(c)
         except UnicodeEncodeError:
             base = unicodedata.normalize("NFKD", c)
+            nombre = unicodedata.name(c, "")
+            griega = re.match(r"GREEK (SMALL|CAPITAL) LETTER (\w+)$", nombre)
+            if griega:          # "βcrit" -> "beta crit", "Δt" -> "Delta t"
+                letra = griega.group(2).lower()
+                out.append(letra.capitalize() if griega.group(1) == "CAPITAL" else letra)
+                if s[i + 1:i + 2].isalnum():
+                    out.append(" ")
+                continue
             out.append("".join(b for b in base if not unicodedata.combining(b)
                                and b.encode("latin-1", "ignore")) or "?")
     return "".join(out)
@@ -191,6 +216,16 @@ def sede_evento(reg: dict) -> dict:
         if f:
             datos["fecha"] = f"{int(f.group(2)):02d}/{meses[f.group(1).lower()]}/{f.group(3)}"
     return datos
+
+
+def mes_anio(fecha: str) -> str:
+    """dd/mm/aaaa o mm/aaaa -> mm/aaaa, que es lo que pide SIGEVA.
+
+    sede_evento devuelve dd/mm/aaaa cuando la saca del booktitle, pero
+    datos-manuales.json la trae en mm/aaaa: hay que aceptar las dos.
+    """
+    partes = (fecha or "").split("/")
+    return "/".join(partes[-2:]) if len(partes) in (2, 3) else ""
 
 
 def _pais_en_texto(texto: str) -> tuple:
@@ -290,6 +325,81 @@ def asegurar_editorial(page, reg: dict) -> list:
     return avisos
 
 
+def fijar_fechas(page, fechas: dict) -> None:
+    """Escribe las fechas y verifica que queden. Va justo antes de Guardar.
+
+    Los campos de fecha son datepickers de jQuery UI (calendar-year-month,
+    calendar-year). Al cerrarse, el picker escribe en el campo el mes y año
+    que tiene SELECCIONADOS, y no lo que se tipeo; sin seleccion, es el mes
+    actual. Con page.fill el picker se abre, y al pasar al campo siguiente
+    se cierra y pisa la fecha: asi quedaron en 07/2026 los 70 registros de
+    julio. Por eso se fija con setDate, que mueve la seleccion y el valor
+    juntos, y se escribe tambien el input oculto que algunos formularios
+    repiten con el mismo name.
+    """
+    resultado = page.evaluate(
+        """(fechas) => {
+            const $ = window.jQuery;
+            // un picker abierto escribiria su seleccion al cerrarse
+            if ($) $('.hasDatepicker').each(function () { $(this).datepicker('hide'); });
+            if (document.activeElement) document.activeElement.blur();
+            const leido = {};
+            for (const [nombre, valor] of Object.entries(fechas)) {
+                const p = valor.split('/');
+                const d = p.length === 2 ? new Date(+p[1], +p[0] - 1, 1) : new Date(+p[0], 1, 1);
+                document.getElementsByName(nombre).forEach(el => {
+                    if (el.type !== 'hidden' && $ && $(el).hasClass('hasDatepicker'))
+                        $(el).datepicker('setDate', d);
+                    else
+                        el.value = valor;
+                });
+                leido[nombre] = Array.from(document.getElementsByName(nombre)).map(e => e.value);
+            }
+            return leido;
+        }""", fechas)
+    for nombre, valor in fechas.items():
+        if not resultado.get(nombre) or any(v != valor for v in resultado[nombre]):
+            raise RuntimeError(f"la fecha {nombre} quedó {resultado.get(nombre)} "
+                               f"en vez de {valor}")
+
+
+def fecha_evento_de(reg: dict) -> str:
+    """Fecha del evento en mm/aaaa.
+
+    Si no se conoce la sede se usa la de publicacion: para un paper de
+    congreso es del mismo año.
+    """
+    return (mes_anio(sede_evento(reg)["fecha"])
+            or reg.get("fecha_publicacion") or f"01/{reg['anio']}")
+
+
+def fechas_de(page, reg: dict) -> dict:
+    """Las fechas que corresponden a este registro, segun los campos del formulario.
+
+    Cada vuelta por el buscador de revistas o de instituciones re-renderiza el
+    formulario, asi que se escriben al final, con fijar_fechas.
+    """
+    fechas = {}
+    if page.locator('input[name="fechaPublica"]').count() and reg.get("fecha_publicacion"):
+        fechas["fechaPublica"] = reg["fecha_publicacion"]
+    if page.locator('input[name="anioPublica"]').count():
+        fechas["anioPublica"] = str(reg["anio"])
+    if page.locator('input[name="fechaReunion"]').count():
+        fechas["fechaReunion"] = fecha_evento_de(reg)
+    return fechas
+
+
+def anio_esperado(reg: dict) -> int:
+    """Año que la lista de SIGEVA debe mostrar despues de guardar.
+
+    En articulos sale de la fecha de publicacion; en eventos, del año de
+    publicacion de las actas.
+    """
+    if reg["tipo"] == "articulo" and reg.get("fecha_publicacion"):
+        return int(reg["fecha_publicacion"].split("/")[-1])
+    return int(reg["anio"])
+
+
 def limpiar_titulo(s: str) -> str:
     """Saca restos de LaTeX que el bib arrastra ($mu$D3TN -> muD3TN)."""
     s = re.sub(r"\$([^$]*)\$", r"\1", s)
@@ -298,7 +408,7 @@ def limpiar_titulo(s: str) -> str:
 
 # --------------------------------------------------------------------- sesion
 
-def esperar_login(page) -> None:
+def esperar_login(page, espera_ms: int = 300_000) -> None:
     page.goto(INTRANET, wait_until="domcontentloaded")
     if page.locator('a[onclick*="redirect("]').count() > 0:
         log("Sesión ya autenticada.")
@@ -330,11 +440,11 @@ def esperar_login(page) -> None:
 
     print("\n" + "=" * 66)
     print("  Ingresá tu usuario y contraseña en la ventana de Chromium.")
-    print("  Yo no los veo ni los guardo. Espero hasta 5 minutos.")
+    print(f"  Yo no los veo ni los guardo. Espero hasta {espera_ms // 60_000} minutos.")
     print("=" * 66 + "\n")
     try:
         page.wait_for_selector('a[onclick*="redirect("]', state="attached",
-                                timeout=300_000)
+                                timeout=espera_ms)
     except PWTimeout:
         sys.exit("No detecté la sesión iniciada. Volvé a correrlo.")
     log("Sesión detectada.")
@@ -377,60 +487,6 @@ def rellenar_junto_a(page, etiqueta: str, valor: str) -> bool:
             }
             return false;
         }""", [etiqueta, valor])
-
-
-def fijar_fecha(page, campo: str, valor: str) -> bool:
-    """Escribe una fecha 'mm/aaaa' o 'aaaa' en un campo con datepicker.
-
-    Los campos de fecha son datepickers de jQuery UI cuyo onClose reescribe el
-    valor con la fecha que el widget tiene seleccionada. fill() cambia el texto
-    pero no esa seleccion, que queda en el mes actual: al perder el foco el
-    campo pasaba a mostrar la fecha de hoy. setDate fija las dos cosas.
-    """
-    partes = [int(p) for p in valor.split("/")]
-    anio, mes = partes[-1], (partes[0] if len(partes) == 2 else 1)
-    escrito = page.evaluate(
-        """([campo, anio, mes]) => {
-            const e = document.querySelector(`input[name="${campo}"]`);
-            if (!e) return null;
-            if (window.jQuery && jQuery(e).hasClass('hasDatepicker'))
-                jQuery(e).datepicker('setDate', new Date(anio, mes - 1, 1));
-            else
-                e.value = e.maxLength === 4 ? String(anio)
-                        : String(mes).padStart(2, '0') + '/' + anio;
-            return e.value;
-        }""", [campo, anio, mes])
-    return escrito == valor
-
-
-def fecha_evento_de(reg: dict) -> str:
-    """Fecha del evento en mm/aaaa.
-
-    Si no se conoce la sede se usa la de publicacion: para un paper de
-    congreso es del mismo año.
-    """
-    partes = (sede_evento(reg)["fecha"] or "").split("/")
-    fecha = "/".join(partes[1:]) if len(partes) == 3 else ""
-    return fecha or reg.get("fecha_publicacion") or f"01/{reg['anio']}"
-
-
-def reponer_fechas(page, reg: dict) -> list:
-    """Vuelve a escribir las fechas al final del llenado.
-
-    Cada vuelta por el buscador de revistas o de instituciones re-renderiza el
-    formulario y los datepicker arrancan otra vez en la fecha de hoy, asi que
-    las fechas se escriben despues de los autores y se verifican.
-    """
-    if reg["tipo"] == "articulo":
-        fechas = {"fechaPublica": reg.get("fecha_publicacion") or ""}
-    else:
-        fechas = {"anioPublica": str(reg["anio"]), "fechaReunion": fecha_evento_de(reg)}
-    avisos = []
-    for campo, valor in fechas.items():
-        if valor and page.locator(f'input[name="{campo}"]').count() \
-                and not fijar_fecha(page, campo, valor):
-            avisos.append(f"no pude fijar {campo} en {valor}")
-    return avisos
 
 
 def mostrar_todos_los_autores(page) -> None:
@@ -499,15 +555,25 @@ def completar_comunes(page, reg: dict, con_adjunto: bool) -> list:
                 "-dPDFSETTINGS=/printer -o chico.pdf grande.pdf")
         page.set_input_files('input[name="theFile"]', reg["pdf"])
         # el Instructivo recomienda el Post-Print (version aceptada); si no
-        # esta en la lista se usa la primera opcion real
+        # esta en la lista se usa la primera opcion real. Cuando lo unico que
+        # hay es el preprint (arXiv), "version_pdf": "preprint" en
+        # datos-manuales.json lo declara como tal: ponerle post-print seria falso
+        preprint = reg.get("version_pdf") == "preprint"
         valor = page.evaluate(
-            """() => {
+            """(preprint) => {
                 const s = document.querySelector('select[name="tipoAdjunto"]');
                 if (!s) return null;
                 const opts = Array.from(s.options).filter(o => o.value && o.value !== '-1');
+                if (preprint) {
+                    const pre = opts.find(o => /pre.?print/i.test(o.text));
+                    return pre ? pre.value : 'sin-preprint';
+                }
                 const pref = opts.find(o => /post.?print|aceptad/i.test(o.text));
                 return (pref || opts[0] || {}).value || null;
-            }""")
+            }""", preprint)
+        if valor == "sin-preprint":
+            raise RuntimeError("el PDF es un preprint y el formulario no ofrece "
+                               "esa opción en el tipo de adjunto")
         if valor:
             page.select_option('select[name="tipoAdjunto"]', valor)
         # el formulario de eventos no tiene ese selector: no es un problema
@@ -575,15 +641,14 @@ def cargar_articulo(page, reg: dict) -> list:
         else:
             avisos.append("país de edición sin deducir")
 
-    # SIGEVA exige fecha de publicacion en mm/aaaa
+    # SIGEVA exige fecha de publicacion en mm/aaaa. La escribe fijar_fechas al
+    # final, con la del registro aunque la precarga haya traido otra
     campo_fecha = page.locator('input[name="fechaPublica"]')
-    if campo_fecha.count() and not campo_fecha.first.input_value().strip():
-        if reg.get("fecha_publicacion"):
-            fijar_fecha(page, "fechaPublica", reg["fecha_publicacion"])
-            if reg.get("fecha_aproximada"):
-                avisos.append("mes de publicación estimado")
-        else:
-            avisos.append("sin fecha de publicación")
+    if campo_fecha.count() and not reg.get("fecha_publicacion") \
+            and not campo_fecha.first.input_value().strip():
+        avisos.append("sin fecha de publicación")
+    elif reg.get("fecha_aproximada"):
+        avisos.append("mes de publicación estimado")
 
     paginas = re.match(r"\s*(\d+)\s*-\s*(\d+)", reg.get("paginas") or "")
     if paginas:
@@ -858,7 +923,8 @@ def falta_en_catalogo(reg: dict, cat) -> bool:
     from catalogo import BASURA
     for a in reg.get("autores", []):
         nombre = (a.get("institucion") or "").strip()
-        if not nombre or BASURA.match(nombre):
+        # mismo criterio que inyectar_autores: lo verificado a mano no se filtra
+        if not nombre or (BASURA.match(nombre) and not a.get("verificada")):
             continue
         if CFG.es_declarante(a["apellido"]):
             continue
@@ -896,6 +962,15 @@ def cargar_autores(page, reg: dict) -> list:
         radios = page.locator('input[name="autorSel"]')
         if propio < radios.count():
             radios.nth(propio).check()
+        # sin radio (14.11.24.5 en adelante) se marca como en inyectar_autores
+        elif not page.evaluate(
+                """([i, personaId]) => {
+                    const p = document.getElementsByName('autorPersonaId')[i];
+                    if (!p || !personaId) return false;
+                    p.value = personaId;
+                    return true;
+                }""", [propio, CFG.PERSONA_ID]):
+            avisos.append("no pude marcar al declarante (¿falta sigeva.persona_id en config.json?)")
     else:
         avisos.append(f"no encontré a {CFG.CONF['apellido']} entre los autores")
 
@@ -927,12 +1002,13 @@ def cargar_autores(page, reg: dict) -> list:
     return avisos
 
 
-def aparece_en_lista(page, reg: dict) -> bool:
-    """Confirma que el registro quedo realmente cargado.
+def buscar_en_lista(page, reg: dict) -> dict | None:
+    """Busca el registro en la lista viva de SIGEVA: {anio, href} o None.
 
-    SIGEVA puede volver del Guardar sin mensaje de error y sin haber guardado
-    nada, asi que el unico criterio confiable es encontrarlo en la lista. Se
-    compara por prefijo normalizado porque la lista trunca los titulos.
+    'anio' es el que muestra la lista y 'href' el enlace de Editar. SIGEVA
+    puede volver del Guardar sin mensaje de error y sin haber guardado nada,
+    asi que el unico criterio confiable es encontrarlo en la lista. Sirve
+    tambien antes de crear, para no duplicar lo que se cargo por otro camino.
 
     Despues del Guardar la pagina puede seguir navegando (popup de upload,
     redirect) y eso destruye el contexto en medio del evaluate: se espera a
@@ -947,51 +1023,113 @@ def aparece_en_lista(page, reg: dict) -> bool:
                 raise
             log("    la página seguía navegando, reintento la verificación")
             page.wait_for_timeout(4_000)
-    return False
+    return None
 
 
-def confirmar_guardado(page, reg: dict, intentos: int = 6) -> bool:
-    """aparece_en_lista con paciencia, para usar despues de Guardar.
+def confirmar_guardado(page, reg: dict, intentos: int = 6) -> dict | None:
+    """buscar_en_lista con paciencia, para usar despues de Guardar.
 
     Con PDF grandes la subida sigue en curso cuando la pagina ya volvio a la
     lista: el registro aparece segundos despues. Darlo por no guardado en ese
     momento invitaba a reintentar y duplicar.
     """
     for i in range(intentos):
-        if aparece_en_lista(page, reg):
-            return True
+        fila = buscar_en_lista(page, reg)
+        if fila:
+            return fila
         if i < intentos - 1:
             page.wait_for_timeout(10_000)
-    return False
+    return None
 
 
-def _buscar_en_lista(page, reg: dict) -> bool:
-    clave = re.sub(r"[^a-z0-9]", "", sinacentos(limpiar_titulo(reg["titulo"])))[:40]
+def _buscar_en_lista(page, reg: dict) -> dict | None:
+    """Una pasada por la lista.
+
+    Se mira solo la columna Titulo de la tabla del tipo que corresponde (la
+    pagina trae articulos, libros y eventos juntos, y un paper de congreso y su
+    version de revista pueden compartir titulo). La lista trunca los titulos
+    con "...", asi que se compara por prefijo. El año NO filtra: hay registros
+    guardados con el año mal (los de julio de 2026), y filtrar por año los
+    haria invisibles y terminaria en un duplicado. Se devuelve para que quien
+    llama lo verifique. Se recorren todas las paginas, no un numero fijo.
+    """
+    clave = re.sub(r"[^a-z0-9]", "", sinacentos(limpiar_titulo(reg["titulo"])))
     if not clave:
-        return False
-    return page.evaluate(
-        """async ([clave, tabla]) => {
+        return None
+    r = page.evaluate(
+        r"""async ([clave, tabla]) => {
             const dec = new TextDecoder('iso-8859-1');
             const base = 'bcoProduccionListaPublicacion.do?idMenu=1466&paginar=true'
                        + '&idModulo=6&prod=cientifica&idGrupo=6';
-            const limpiar = (s) => (s || '').normalize('NFKD')
-                .replace(/[\\u0300-\\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
-            for (let p = 1; p <= 8; p++) {
+            const norm = (s) => (s || '').normalize('NFKD')
+                .replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+            const vistas = new Set();
+            for (let p = 1; p <= 40; p++) {
                 const r = await fetch(`${base}&d-${tabla}-p=${p}`, {credentials: 'same-origin'});
                 const doc = new DOMParser().parseFromString(dec.decode(await r.arrayBuffer()), 'text/html');
-                const filas = Array.from(doc.querySelectorAll('tr'));
-                for (const f of filas) {
-                    const t = limpiar(f.innerText);
-                    if (t && (t.includes(clave) || clave.startsWith(t.slice(0, 30)) && t.length > 40)) {
-                        if (t.includes(clave.slice(0, 30))) return true;
+                // por el parametro de orden (-s): desde la pagina 2 los enlaces
+                // de todas las tablas copian la query, con el -p de esta
+                const t = Array.from(doc.querySelectorAll('table'))
+                    .find(x => x.tHead && x.tHead.innerHTML.includes(`d-${tabla}-s=`));
+                if (!t) return p === 1 ? 'sin-tabla' : null;
+                const cab = Array.from(t.tHead.querySelectorAll('th'))
+                    .map(h => h.textContent.trim());
+                const iTit = cab.indexOf('Título'), iAnio = cab.indexOf('Año');
+                if (iTit < 0) return 'sin-tabla';
+                let nuevas = 0;
+                for (const f of (t.tBodies.length ? Array.from(t.tBodies[0].rows) : [])) {
+                    const celdas = Array.from(f.cells).map(c => c.textContent.trim());
+                    if (celdas.length <= iTit) continue;
+                    const k = celdas.join('|');
+                    if (vistas.has(k)) continue;
+                    vistas.add(k);
+                    nuevas++;
+                    const crudo = celdas[iTit];
+                    const truncado = /\.\.\.\s*$/.test(crudo);
+                    const tit = norm(truncado ? crudo.replace(/[.\s]+$/, '') : crudo);
+                    if (tit === clave || (truncado && tit.length >= 25 && clave.startsWith(tit))) {
+                        const ed = f.querySelector('a[href*="action=Editar"]');
+                        return {anio: iAnio >= 0 ? (parseInt(celdas[iAnio], 10) || 0) : 0,
+                                href: ed ? ed.getAttribute('href') : ''};
                     }
                 }
+                if (!nuevas) return null;
             }
-            return false;
+            return null;
         }""", [clave, "3997137" if reg["tipo"] == "articulo" else "8106305"])
+    if r == "sin-tabla":
+        # sin la tabla no se puede afirmar nada, y un 'no esta' falso
+        # terminaria en un duplicado
+        raise RuntimeError("no encontré la tabla de la lista: ¿cambió el HTML de SIGEVA?")
+    return r or None
 
 
-def inyectar_autores(page, reg: dict, cat, en_tbody: bool = True) -> list:
+def anio_en_lista(page, reg: dict) -> int | None:
+    fila = buscar_en_lista(page, reg)
+    return fila["anio"] if fila else None
+
+
+def aparece_en_lista(page, reg: dict) -> bool:
+    return buscar_en_lista(page, reg) is not None
+
+
+def fechas_guardadas(page, href: str, nombres: list) -> dict:
+    """Lee las fechas de un registro ya guardado, abriendolo en modo Editar.
+
+    Solo lee: trae la pagina con fetch y no envia nada.
+    """
+    return page.evaluate(
+        r"""async ([href, nombres]) => {
+            const dec = new TextDecoder('iso-8859-1');
+            const r = await fetch(href, {credentials: 'same-origin'});
+            const doc = new DOMParser().parseFromString(dec.decode(await r.arrayBuffer()), 'text/html');
+            const out = {};
+            for (const n of nombres) out[n] = Array.from(doc.getElementsByName(n)).map(e => e.value);
+            return out;
+        }""", [href, nombres])
+
+
+def inyectar_autores(page, reg: dict, cat) -> list:
     """Carga autores y filiaciones inyectando las filas ocultas del formulario.
 
     SIGEVA arma las filiaciones navegando tres pantallas por autor. Pero al
@@ -1008,8 +1146,10 @@ def inyectar_autores(page, reg: dict, cat, en_tbody: bool = True) -> list:
     for a in reg["autores"]:
         cruda = (a.get("institucion") or "").strip()
         # OpenAlex a veces devuelve cualquier cosa ("FC Barcelona"): antes de
-        # escribir un dato falso en una DDJJ, mejor dejarlo sin informar
-        if cruda and BASURA.match(cruda):
+        # escribir un dato falso en una DDJJ, mejor dejarlo sin informar. Lo
+        # que viene de datos-manuales.json con "verificada" ya lo miro alguien
+        # (Vint Cerf si es de Google)
+        if cruda and BASURA.match(cruda) and not a.get("verificada"):
             cruda = ""
         a = {**a, "institucion": cruda}
         inst = cat.institucion(cruda)
@@ -1028,7 +1168,7 @@ def inyectar_autores(page, reg: dict, cat, en_tbody: bool = True) -> list:
             d["label"] = PLACEHOLDER_INSTITUCION
 
     resultado = page.evaluate(
-        """([autores, tipoInternacional, enTbody]) => {
+        """([autores, tipoInternacional, personaId]) => {
             const filas = () => document.getElementsByName('autorParticipacionLabel');
             const nuevo = document.getElementsByName('autorNuevo')[0];
             while (filas().length < autores.length && nuevo) nuevo.click();
@@ -1040,20 +1180,16 @@ def inyectar_autores(page, reg: dict, cat, en_tbody: bool = True) -> list:
                 const campos = filas();
                 if (i >= campos.length) return;
                 campos[i].value = a.nombre;
-                // Los dos formularios anidan distinto: en artículos la fila del
-                // autor vive dentro del <tbody> y las filiaciones se apendean
-                // ahí; en eventos el autor está en un <th> con el <tbody>
-                // vacío, y hay que insertarlas justo después de su fila.
-                const filaAutor = campos[i].closest('tr');
+                // Cada autor tiene su tabla anidada: el nombre en el <thead> y
+                // las filiaciones en el <tbody>. Al guardar, preSubmit() arma
+                // autorJSON leyendo solo ese <tbody>: una fila en otro lugar
+                // se ve en pantalla pero no viaja (asi quedaron sin
+                // filiaciones los eventos de julio de 2026, con 14.11.20).
                 const tabla = campos[i].closest('table');
-                const cuerpo = tabla ? tabla.querySelector('tbody') : null;
-                if (!filaAutor && !cuerpo) return;
+                if (!tabla) return;
+                const cuerpo = tabla.tBodies[0] || tabla.appendChild(document.createElement('tbody'));
                 const esOtra = a.id ? 'false' : 'true';
-                // articulos: las filiaciones van dentro del <tbody> del autor.
-                // eventos: el autor esta en un <th> y van despues de su fila.
-                const destino = (enTbody && cuerpo)
-                    ? [cuerpo, 'beforeend'] : [filaAutor, 'afterend'];
-                destino[0].insertAdjacentHTML(destino[1], `
+                cuerpo.insertAdjacentHTML('beforeend', `
                     <tr class="odd"><td colspan="2"><div>${a.label}</div>
                     ${oculto('autorOrganizacionLabel', a.label)}
                     ${oculto('autorOrganizacionId', a.id)}
@@ -1071,20 +1207,29 @@ def inyectar_autores(page, reg: dict, cat, en_tbody: bool = True) -> list:
                        value="Borrar" class="borrar"></td></tr>`);
             });
 
-            // el declarante se marca con el radio, que dispara seleccionarAutor()
+            // el declarante: hasta 14.11.20 era un radio (autorSel); desde
+            // 14.11.24.5 es el autor con autorPersonaId = id de persona
             const idx = autores.findIndex(a => a.propio);
+            let marcado = false;
             if (idx >= 0) {
                 const radios = document.getElementsByName('autorSel');
+                const personas = document.getElementsByName('autorPersonaId');
                 if (radios[idx]) {
                     radios[idx].checked = true;
                     radios[idx].dispatchEvent(new Event('change', {bubbles: true}));
+                    marcado = true;
+                } else if (personas[idx] && personaId) {
+                    personas[idx].value = personaId;
+                    marcado = true;
                 }
             }
-            return {filas: filas().length, declarante: idx};
-        }""", [datos, TIPO_INTERNACIONAL, en_tbody])
+            return {filas: filas().length, declarante: idx, marcado};
+        }""", [datos, TIPO_INTERNACIONAL, CFG.PERSONA_ID])
 
     if resultado["declarante"] < 0:
         avisos.append(f"no encontré a {CFG.CONF['apellido']} entre los autores")
+    elif not resultado["marcado"]:
+        avisos.append("no pude marcar al declarante (¿falta sigeva.persona_id en config.json?)")
     if resultado["filas"] < len(datos):
         avisos.append(f"entraron {resultado['filas']} de {len(datos)} autores")
     if sin_catalogo:
@@ -1163,12 +1308,12 @@ def cargar_articulo_manual(page, reg: dict) -> list:
     if paginas:
         page.fill('input[name="paginaInicial"]', paginas.group(1))
         page.fill('input[name="paginaFinal"]', paginas.group(2))
-    if reg.get("fecha_publicacion"):
-        fijar_fecha(page, "fechaPublica", reg["fecha_publicacion"])
-        if reg.get("fecha_aproximada"):
-            avisos.append("mes de publicación estimado")
-    else:
+    # la fecha la escribe fijar_fechas al final: escribirla aca no sirve,
+    # el datepicker la pisa (ver fijar_fechas)
+    if not reg.get("fecha_publicacion"):
         avisos.append("sin fecha de publicación")
+    elif reg.get("fecha_aproximada"):
+        avisos.append("mes de publicación estimado")
 
     page.check('input[name="tipoReferato"][value="2"]')      # con referato
     page.check('input[name="publicado"][value="1"]')         # publicado
@@ -1183,10 +1328,9 @@ def cargar_articulo_manual(page, reg: dict) -> list:
         avisos.append("instituciones nuevas: uso el alta real (más lento)")
         avisos += cargar_autores(page, reg)
     else:
-        avisos += inyectar_autores(page, reg, cat, en_tbody=True)
+        avisos += inyectar_autores(page, reg, cat)
     avisos += fijar_soporte(page, reg)
     avisos += completar_comunes(page, reg, con_adjunto=True)
-    avisos += reponer_fechas(page, reg)
     return avisos
 
 
@@ -1208,14 +1352,13 @@ def cargar_evento(page, reg: dict) -> list:
     page.fill('input[name="lugarPublicacion"]', sede["ciudad"])
     editorial, _ = editorial_y_pais(reg)
     page.fill('input[name="editorial"]', editorial or reg.get("editorial") or "")
-    fijar_fecha(page, "anioPublica", str(reg["anio"]))
+    # anioPublica y fechaReunion las escribe fijar_fechas al final (ver ahi)
     evento = re.split(r",\s*\d{1,2}\s+\w+\s+\d{4}", reg["venue"])[0]
     page.fill('input[name="reunionCientifica"]', evento[:250])
     page.select_option('select[name="tipoReunion"]', label=tipo_reunion_de(reg))
     page.check('input[name="alcanceInternacional"]')
     page.select_option('select[name="paisEvento"]', label=sede["pais"])
     page.fill('input[name="lugarReunion"]', sede["ciudad"])
-    fijar_fecha(page, "fechaReunion", fecha_evento_de(reg))     # mm/aaaa
 
     # el soporte es obligatorio, y si se marca "electronico" SIGEVA exige la URL
     enlace = reg.get("url") or (f"https://doi.org/{reg['doi']}" if reg.get("doi") else "")
@@ -1236,10 +1379,9 @@ def cargar_evento(page, reg: dict) -> list:
         avisos.append("instituciones nuevas: uso el alta real (más lento)")
         avisos += cargar_autores(page, reg)
     else:
-        avisos += inyectar_autores(page, reg, cat, en_tbody=False)
+        avisos += inyectar_autores(page, reg, cat)
     avisos += fijar_soporte(page, reg)
     avisos += completar_comunes(page, reg, con_adjunto=True)
-    avisos += reponer_fechas(page, reg)
     return avisos
 
 
@@ -1271,7 +1413,11 @@ def main():
             and (not a.desde or (r["anio"] or 0) >= a.desde)
             and not ya_cargado(r["clave"])
             and (not a.con_pdf or (r.get("pdf") and Path(r["pdf"]).exists()))
-            and not r.get("excluir")]
+            and not r.get("excluir")
+            and not r.get("en_prensa")]
+    en_prensa = sum(1 for r in datos if r.get("en_prensa") and not ya_cargado(r["clave"]))
+    if en_prensa:
+        log(f"{en_prensa} en prensa ('to appear' en el .bib): quedan para cuando salgan")
     # los articulos con DOI son los mas baratos y los que mas pesan: primero
     cola.sort(key=lambda r: (r["tipo"] != "articulo", not r["doi"], -(r["anio"] or 0)))
     if a.limit:
@@ -1315,10 +1461,17 @@ def main():
                 if not sesion_viva(page):
                     registrar({"clave": reg["clave"], "resultado": "sesion-expirada"})
                     break
-            # estado.json solo sabe lo que cargo este script: antes de crear se
-            # mira la lista en vivo, por si el registro entro por otro lado
-            if not a.dry_run and aparece_en_lista(page, reg):
-                log("    ya está en SIGEVA: no lo vuelvo a cargar")
+
+            # estado.json solo sabe lo que cargo este script. Lo cargado a mano,
+            # o un Guardar que tiro LockAcquisitionException pero entro igual,
+            # se ve recien en la lista
+            try:
+                ya_esta = aparece_en_lista(page, reg)
+            except Exception as e:
+                log(f"    no pude revisar la lista ({str(e)[:120]}); corto acá")
+                break
+            if ya_esta:
+                log("    ya está en SIGEVA, lo salteo")
                 registrar({"clave": reg["clave"], "titulo": reg["titulo"],
                            "resultado": "ya-estaba"})
                 continue
@@ -1336,6 +1489,9 @@ def main():
                         log(f"    precarga falló ({e}); voy por la vía manual")
                         avisos = cargar_articulo_manual(page, reg)
                         avisos.append("cargado por vía manual")
+                # al final, cuando ya nada re-renderiza el formulario
+                esperadas = fechas_de(page, reg)
+                fijar_fechas(page, esperadas)
             except Exception as e:
                 detalle = re.sub(r"\s+", " ", str(e))[:400]
                 log(f"    NO SE PUDO: {detalle[:160]}")
@@ -1403,7 +1559,7 @@ def main():
                 try:
                     page.set_input_files('input[name="theFile"]', reg["pdf"])
                     # el re-render tambien pisa las fechas: hay que reponerlas
-                    reponer_fechas(page, reg)
+                    fijar_fechas(page, esperadas)
                     page.click('input[type="submit"][value="Guardar"]')
                     page.wait_for_load_state("networkidle", timeout=45_000)
                 except Exception:
@@ -1423,7 +1579,9 @@ def main():
             # No alcanza con "no hubo mensaje de error": esto es una declaracion
             # jurada y un 'guardado' falso haria que el registro se saltee para
             # siempre. Se confirma yendo a buscarlo a la lista.
-            if not confirmar_guardado(page, reg):
+            fila = confirmar_guardado(page, reg)
+            anio = fila["anio"] if fila else None
+            if anio is None:
                 log("    NO QUEDÓ GUARDADO (no aparece en la lista)")
                 page.screenshot(path=str(CAPTURAS / f"no-guardo-{reg['clave'][:36].replace('/', '_')}.png"),
                                 full_page=True)
@@ -1432,6 +1590,29 @@ def main():
                            "detalle": "sin error visible, pero no figura en la lista"})
                 fallos += 1
                 continue
+            # y con el año correcto: en julio de 2026 se guardaron 70 registros
+            # con la fecha del dia sin que nada lo avisara
+            if anio != anio_esperado(reg):
+                log(f"    GUARDADO CON EL AÑO MAL: la lista dice {anio}, "
+                    f"tenía que decir {anio_esperado(reg)}. Corto la tanda.")
+                registrar({"clave": reg["clave"], "titulo": reg["titulo"],
+                           "tipo": reg["tipo"], "resultado": "guardado-fecha-mal",
+                           "detalle": f"lista {anio}, esperado {anio_esperado(reg)}"})
+                fallos += 1
+                break
+            # el año de la lista no distingue un 07/2026 de un 09/2026: se abre
+            # el registro y se comparan las fechas una por una
+            guardadas = fechas_guardadas(page, fila["href"], list(esperadas)) if fila["href"] else {}
+            distintas = {k: v for k, v in guardadas.items()
+                         if any(x != esperadas[k] for x in v) or not v}
+            if not fila["href"] or distintas:
+                log(f"    GUARDADO CON FECHAS MAL: {distintas or 'no pude abrirlo'}, "
+                    f"esperaba {esperadas}. Corto la tanda.")
+                registrar({"clave": reg["clave"], "titulo": reg["titulo"],
+                           "tipo": reg["tipo"], "resultado": "guardado-fecha-mal",
+                           "detalle": f"guardado {distintas}, esperado {esperadas}"})
+                fallos += 1
+                break
 
             registrar({"clave": reg["clave"], "titulo": reg["titulo"],
                        "tipo": reg["tipo"], "resultado": "guardado",

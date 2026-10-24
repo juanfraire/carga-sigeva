@@ -4,7 +4,8 @@
 
   "sigeva": {
     "base": "https://si.conicet.gov.ar",
-    "rol_banco_datos": 96
+    "rol_banco_datos": 96,
+    "persona_id": ""
   },
 
   "bib": "~/cv/publicaciones.bib",

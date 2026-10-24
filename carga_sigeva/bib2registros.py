@@ -217,6 +217,10 @@ def convertir(bib: Path) -> list:
             "isbn": c.get("isbn", ""),
             "keywords": kw,
             "destacado": "selected" in kw,
+            # aceptado pero sin publicar: no se puede declarar como publicado
+            # hasta que salga (y tenga DOI, paginas, editorial)
+            "en_prensa": bool(re.search(r"to appear|in press|accepted|en prensa",
+                                        c.get("note", ""), re.I)),
             "pdf": None,          # lo completa emparejar_pdfs.py
         })
     return registros

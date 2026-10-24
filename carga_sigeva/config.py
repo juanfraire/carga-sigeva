@@ -32,6 +32,10 @@ DEFECTOS = {
     "sigeva": {
         "base": "https://si.conicet.gov.ar",
         "rol_banco_datos": 96,
+        # Id de persona de quien carga. Desde la version 14.11.24.5 el autor
+        # declarante se marca con el, no con un radio. Se ve en autorJSON
+        # (campo personaId) de cualquier produccion ya cargada.
+        "persona_id": "",
     },
 
     # Bibliografia de entrada, en formato BibTeX.
@@ -76,6 +80,7 @@ APELLIDO = (CONF.get("apellido") or "").strip().lower()
 MAIL = CONF.get("mail_contacto") or ""
 BASE = CONF["sigeva"]["base"].rstrip("/")
 ROL_BANCO_DATOS = int(CONF["sigeva"]["rol_banco_datos"])
+PERSONA_ID = str(CONF["sigeva"].get("persona_id") or "")
 BIB = Path(CONF["bib"]).expanduser() if CONF.get("bib") else None
 CARPETAS_PDF = [Path(p).expanduser() for p in CONF.get("carpetas_pdf") or []]
 AREA_CONOCIMIENTO = (CONF["area_conocimiento"]["campo"],
