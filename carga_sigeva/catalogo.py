@@ -35,6 +35,10 @@ GENERICAS = {
 ALIAS = {
     "saarland university": "universitat des saarlandes",
     "inria": "institut national de recherche en informatique",
+    # nombre oficial actual de Inria, que es el que devuelve OpenAlex
+    "institut national de recherche en sciences et technologies du numerique":
+        "institut national de recherche en informatique",
+    "centre inria de lyon": "institut national de recherche en informatique",
     "national space activities commission": "comision nacional de actividades espaciales",
     "conae": "argentinian space agency",
 }

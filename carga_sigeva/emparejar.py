@@ -283,13 +283,22 @@ def _pedir(url: str) -> dict:
         return json.load(r)
 
 
+def mismo_titulo(a: str, b: str, umbral: float = 0.9) -> bool:
+    from difflib import SequenceMatcher
+    na, nb = (re.sub(r"[^a-z0-9]", "", sinacentos(x)) for x in (a, b))
+    return bool(na and nb) and SequenceMatcher(None, na, nb).ratio() >= umbral
+
+
 def resumen_openalex(reg: dict, cache: dict) -> str:
     """Abstract desde OpenAlex. Viene como indice invertido {palabra: [pos]}.
 
     Cubre mucho mas que Crossref porque IEEE no deposita abstracts ahi. Busca
     por DOI y, si no hay, por titulo exacto.
     """
-    clave = "oa5:" + (reg["doi"] or reg["titulo_clave"])
+    # oa5: afiliaciones por nombre (ver aplicar_afiliaciones). Las busquedas
+    # por titulo llevan prefijo propio: las de antes de verificar el titulo
+    # pueden ser de otro trabajo y no hay que reusarlas
+    clave = "oa5:" + reg["doi"] if reg["doi"] else "oa6t:" + reg["titulo_clave"]
     if clave in cache:
         d = cache[clave]
         reg["fecha_publicacion"] = d.get("fecha", "")
@@ -305,6 +314,11 @@ def resumen_openalex(reg: dict, cache: dict) -> str:
             q = urllib.parse.quote(reg["titulo"][:180])
             res = _pedir(f"https://api.openalex.org/works?filter=title.search:{q}&per-page=1")
             datos = (res.get("results") or [None])[0]
+            # la busqueda por titulo devuelve el mas parecido, que puede ser
+            # otro trabajo: sin esto un paper se queda con el resumen, la fecha
+            # y las filiaciones de uno ajeno
+            if datos and not mismo_titulo(reg["titulo"], datos.get("display_name") or ""):
+                datos = None
     except Exception:
         datos = None
 
@@ -317,8 +331,11 @@ def resumen_openalex(reg: dict, cache: dict) -> str:
                 posiciones[p] = palabra
         texto = limpiar_texto(" ".join(posiciones[k] for k in sorted(posiciones)))
         texto = re.sub(r"^\s*(abstract|resumen)\b[\s:.-]*", "", texto, flags=re.I)
-        # HAL rellena con esto cuando el deposito no trae abstract real
-        if re.fullmatch(r"(inter)?national audience\.?", texto.strip(), re.I):
+        # HAL rellena con esto cuando el deposito no trae abstract real, y el
+        # repositorio del CONICET con las lineas de filiacion ("Fil: Perez,
+        # Juan. Universidad...")
+        if re.fullmatch(r"(inter)?national audience\.?", texto.strip(), re.I) \
+                or re.match(r"Fil:", texto.strip()):
             texto = ""
     # la fecha sirve para el campo mm/aaaa de SIGEVA, que es obligatorio
     fecha = ""
