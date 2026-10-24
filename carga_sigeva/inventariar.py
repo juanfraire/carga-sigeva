@@ -25,8 +25,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime
 
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+from playwright.sync_api import sync_playwright
 
 import cargar as C          # reutiliza URLs, rol y utilidades
 import cosechar
@@ -62,22 +63,6 @@ PARSER = r"""(html) => {
     });
     return out;
 }"""
-
-
-def esperar_login(page) -> None:
-    page.goto(C.INTRANET, wait_until="domcontentloaded")
-    if page.locator('a[onclick*="redirect("]').count():
-        return
-    print("\n" + "=" * 66)
-    print("  Ingresá tu usuario y contraseña en la ventana de Chromium.")
-    print("  Yo no los veo ni los guardo. Espero hasta 10 minutos.")
-    print("=" * 66 + "\n", flush=True)
-    try:
-        page.wait_for_selector('a[onclick*="redirect("]', state="attached",
-                               timeout=ESPERA_LOGIN)
-    except PWTimeout:
-        sys.exit("No detecté la sesión iniciada. Volvé a correrlo.")
-    C.log("Sesión detectada.")
 
 
 def bajar_listas(page) -> list:
@@ -164,6 +149,23 @@ def parsear(page, paginas: list) -> dict:
                               for k, v in secciones.items()]}
 
 
+def escribir(inventario: dict) -> None:
+    """Reescribe inventario.json; el anterior queda como inventario-<fecha>.json.
+
+    Con la foto vieja a mano se ve qué cambió entre dos tandas.
+    """
+    inventario["_cuando"] = datetime.now().isoformat(timespec="seconds")
+    if INVENTARIO.exists():
+        previo = json.loads(INVENTARIO.read_text(encoding="utf-8"))
+        sello = previo.get("_cuando") or datetime.fromtimestamp(
+            INVENTARIO.stat().st_mtime).isoformat(timespec="seconds")
+        INVENTARIO.replace(AQUI / f"inventario-{sello[:16].replace(':', '')}.json")
+    INVENTARIO.write_text(json.dumps(inventario, ensure_ascii=False, indent=1),
+                          encoding="utf-8")
+    C.log(f"-> {INVENTARIO}")
+    resumen(inventario)
+
+
 def actualizar(page) -> dict:
     """Relee la lista y reescribe inventario.json desde una sesion abierta."""
     HTML.mkdir(exist_ok=True)
@@ -171,10 +173,7 @@ def actualizar(page) -> dict:
     for i, html in enumerate(paginas, 1):
         (HTML / f"lista-{i:02d}.html").write_text(html, encoding="utf-8")
     inventario = parsear(page, paginas)
-    INVENTARIO.write_text(json.dumps(inventario, ensure_ascii=False, indent=1),
-                          encoding="utf-8")
-    C.log(f"-> {INVENTARIO}")
-    resumen(inventario)
+    escribir(inventario)
     return inventario
 
 
@@ -207,7 +206,7 @@ def main():
             navegador = pw.chromium.launch(headless=False)
             page = navegador.new_context(
                 viewport={"width": 1400, "height": 1000}).new_page()
-            esperar_login(page)
+            C.esperar_login(page, espera_ms=ESPERA_LOGIN)
             C.entrar_banco_datos(page)
 
             HTML.mkdir(exist_ok=True)
@@ -217,11 +216,7 @@ def main():
             (HTML / "indice.html").write_text(bajar_indice(page), encoding="utf-8")
             C.log(f"{len(paginas)} páginas de la lista guardadas en {HTML}")
 
-        inventario = parsear(page, paginas)
-        INVENTARIO.write_text(json.dumps(inventario, ensure_ascii=False, indent=1),
-                              encoding="utf-8")
-        C.log(f"-> {INVENTARIO}")
-        resumen(inventario)
+        escribir(parsear(page, paginas))
 
         if not a.offline and not a.sin_catalogo:
             try:
