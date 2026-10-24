@@ -158,9 +158,12 @@ def partir_autores(raw: str) -> list:
 def tipificar(tipo_bib: str, kw: str, venue: str) -> str:
     """Tipo de produccion para SIGEVA."""
     kw = kw.lower()
-    if "thesis" in kw:
+    if "thesis" in kw or tipo_bib in ("phdthesis", "mastersthesis"):
         return "tesis"
-    if "arxiv" in kw or "preprint" in kw or venue.lower().startswith("corr"):
+    # DBLP marca los preprints como CoRR; Google Scholar los exporta como
+    # @article con journal "arXiv preprint arXiv:..." o "arXiv e-prints"
+    if ("arxiv" in kw or "preprint" in kw or venue.lower().startswith("corr")
+            or "arxiv" in venue.lower()):
         return "preprint"
     if tipo_bib == "article":
         return "articulo"
@@ -176,7 +179,19 @@ def tipificar(tipo_bib: str, kw: str, venue: str) -> str:
 def convertir(bib: Path) -> list:
     texto = bib.read_text(encoding="utf-8", errors="replace")
     registros = []
+    vistas: dict = {}
     for tipo_bib, clave, cuerpo in _entradas_crudas(texto):
+        # Google Scholar repite claves (dos papers 'liang2025green'). La clave
+        # identifica el registro en estado.json y en pdfs/: repetida, el
+        # segundo se daba por cargado y se salteaba en silencio.
+        if clave in vistas:
+            vistas[clave] += 1
+            nueva = f"{clave}-{vistas[clave]}"
+            print(f"Aviso: la clave '{clave}' está repetida en el .bib; "
+                  f"la entrada siguiente pasa a '{nueva}'", file=sys.stderr)
+            clave = nueva
+        else:
+            vistas[clave] = 1
         c = {k: limpiar(v) for k, v in _campos(cuerpo).items()}
         venue = c.get("journal") or c.get("booktitle") or c.get("publisher") or ""
         kw = c.get("keywords", "")

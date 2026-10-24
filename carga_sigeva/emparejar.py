@@ -39,7 +39,9 @@ VACIAS = {"a", "an", "the", "on", "of", "for", "in", "to", "and", "with", "towar
 
 
 def sinacentos(s: str) -> str:
-    s = unicodedata.normalize("NFKD", s.lower())
+    # la i turca sin punto no se descompone en NFKD: "Yanıkömeroğlu" quedaba
+    # sin cruzar con el "Yanikomeroglu" del .bib
+    s = unicodedata.normalize("NFKD", s.lower().replace("ı", "i"))
     return "".join(c for c in s if not unicodedata.combining(c))
 
 
@@ -169,7 +171,8 @@ def resumen_crossref(doi: str, cache: dict) -> str:
 
 def clave_apellido(nombre: str) -> str:
     """Ultima palabra significativa del nombre, normalizada, para cruzar autores."""
-    partes = [p for p in re.split(r"[\s,]+", sinacentos(nombre)) if len(p) > 1]
+    # el guion tambien separa: "Karabulut-Kurt" y "Karabulut Kurt" son el mismo
+    partes = [p for p in re.split(r"[\s,\-]+", sinacentos(nombre)) if len(p) > 1]
     return re.sub(r"[^a-z]", "", partes[-1]) if partes else ""
 
 
@@ -215,28 +218,61 @@ def limpiar_institucion(nombre: str) -> str:
 
 
 def aplicar_afiliaciones(reg: dict, afiliaciones: dict) -> None:
+    """afiliaciones viene indexado por el nombre del autor en OpenAlex.
+
+    La clave de cruce se calcula aca y no al guardar en el cache: si cambia la
+    normalizacion (paso con la i turca de "Yanıkömeroğlu"), un cache viejo
+    seguia sin cruzar.
+    """
+    por_apellido = {clave_apellido(k): v for k, v in afiliaciones.items()}
     for a in reg.get("autores", []):
-        d = afiliaciones.get(clave_apellido(a["apellido"])) or {}
+        d = por_apellido.get(clave_apellido(a["apellido"])) or {}
         crudo = d.get("institucion", "")
         a["institucion"] = limpiar_institucion(crudo)
         a["pais_institucion"] = d.get("pais", "") or pais_del_texto(crudo)
+
+
+def _crossref(doi: str, cache: dict) -> dict:
+    """Lo que interesa de /works/{doi}: sede del evento y fechas."""
+    clave = "cr:" + doi
+    if clave not in cache:
+        try:
+            m = _pedir("https://api.crossref.org/works/"
+                       + urllib.parse.quote(doi)).get("message") or {}
+        except Exception:
+            m = {}
+        cache[clave] = {
+            "lugar": (m.get("event") or {}).get("location") or "",
+            "fechas": [(m.get(k) or {}).get("date-parts", [[None]])[0]
+                       for k in ("published-online", "published-print", "created")],
+        }
+    return cache[clave]
 
 
 def sede_crossref(reg: dict, cache: dict) -> str:
     """Sede del congreso segun Crossref (campo event.location)."""
     if reg["tipo"] != "evento" or not reg.get("doi"):
         return ""
-    clave = "sede:" + reg["doi"]
-    if clave in cache:
-        return cache[clave]
-    try:
-        datos = _pedir("https://api.crossref.org/works/"
-                       + urllib.parse.quote(reg["doi"]))
-        lugar = ((datos.get("message") or {}).get("event") or {}).get("location") or ""
-    except Exception:
-        lugar = ""
-    cache[clave] = lugar
-    return lugar
+    return _crossref(reg["doi"], cache)["lugar"]
+
+
+def fecha_crossref(reg: dict, cache: dict) -> str:
+    """mm/aaaa de la primera publicacion segun Crossref.
+
+    OpenAlex devuelve AAAA-01-01 cuando solo conoce el año, y eso se cargaba
+    como enero. Crossref suele tener el mes en published-online o
+    published-print, y si no en created (alta del DOI), que en IEEE coincide
+    con la "Date of publication" del early access. Se toma la mas temprana
+    que traiga mes.
+    """
+    if not reg.get("doi"):
+        return ""
+    con_mes = [tuple(f[:2]) for f in _crossref(reg["doi"], cache)["fechas"]
+               if f and len(f) >= 2 and f[0] and f[1]]
+    if not con_mes:
+        return ""
+    anio, mes = min(con_mes)
+    return f"{mes:02d}/{anio}"
 
 
 def _pedir(url: str) -> dict:
@@ -253,7 +289,7 @@ def resumen_openalex(reg: dict, cache: dict) -> str:
     Cubre mucho mas que Crossref porque IEEE no deposita abstracts ahi. Busca
     por DOI y, si no hay, por titulo exacto.
     """
-    clave = "oa4:" + (reg["doi"] or reg["titulo_clave"])
+    clave = "oa5:" + (reg["doi"] or reg["titulo_clave"])
     if clave in cache:
         d = cache[clave]
         reg["fecha_publicacion"] = d.get("fecha", "")
@@ -306,7 +342,7 @@ def resumen_openalex(reg: dict, cache: dict) -> str:
             crudas = a.get("raw_affiliation_strings") or []
             nom_inst = crudas[0] if crudas else ""
         if nom_inst:
-            afiliaciones[clave_apellido(nombre)] = {
+            afiliaciones[nombre] = {
                 "institucion": nom_inst[:120],
                 "pais": (inst.get("country_code") or "").upper()}
     cache[clave] = {"resumen": texto, "fecha": fecha, "issn": issn, "venue": venue,
@@ -335,6 +371,36 @@ def extraer_resumen(pdf: Path) -> str:
     return resumen[:2400].rsplit(".", 1)[0] + "." if len(resumen) > 2400 else resumen
 
 
+RE_INDEX_TERMS = re.compile(
+    r"(?:Index Terms|Keywords|Key words|Mots-cl[ée]s)\s*[—–\-:.]*\s*(.+?)"
+    r"(?:\.\s*(?:\n|$)|\n\s*\n|\n\s*(?:I\.|1\.?)\s+[A-Z])", re.S | re.I)
+
+
+def palabras_clave_pdf(pdf: Path) -> list:
+    """Index Terms / Keywords del propio paper, en el orden en que aparecen.
+
+    Con dos columnas pdftotext a veces mete texto de la otra columna en medio
+    de la lista: se corta en el primer termino que no parece una palabra clave
+    (digitos, corchetes, mas de cinco palabras) en vez de cargar basura. Los
+    parentesis si valen: "Deep Reinforcement Learning (DRL)".
+    """
+    try:
+        txt = subprocess.run(["pdftotext", "-l", "2", str(pdf), "-"],
+                             capture_output=True, text=True, timeout=25).stdout
+    except Exception:
+        return []
+    m = RE_INDEX_TERMS.search(txt)
+    if not m:
+        return []
+    out = []
+    for k in re.split(r"[,;]", m.group(1)):
+        k = re.sub(r"\s+", " ", limpiar_texto(k)).strip(" .")
+        if not k or re.search(r"[\d\[\]]", k) or len(k.split()) > 5:
+            break
+        out.append(k)
+    return out
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--informe", action="store_true")
@@ -357,17 +423,27 @@ def main():
     bajados = AQUI / "pdfs"
     previos = {f.stem: f for f in bajados.glob("*.pdf")} if bajados.is_dir() else {}
 
-    # 1) los de papers-2025 se reconstruyen por clave: match exacto
+    # 1) por nombre: la clave exacta primero, despues la reconstruccion
+    #    <apellido><anio><palabra>. Esa reconstruccion puede dar lo mismo para
+    #    dos papers ("Green satellite..." y "Green traffic..." de Liang 2025):
+    #    un PDF ya asignado no se vuelve a usar. Dos pasadas, para que una
+    #    reconstruccion no se quede con el archivo exacto de otro registro.
+    usados = set()
+    for r in faltantes:
+        saneada = re.sub(r"[^A-Za-z0-9._-]", "_", r["clave"])[:80]
+        exacta = previos.get(saneada) or indice_2025.get(r["clave"].lower())
+        r["pdf"], r["pdf_confianza"] = (str(exacta), "alta") if exacta else (None, "")
+        if exacta:
+            usados.add(Path(exacta))
     pendientes = []
     for i, r in enumerate(faltantes):
+        if r["pdf"]:
+            continue
         k = clave_scholar(r)
-        saneada = re.sub(r"[^A-Za-z0-9._-]", "_", r["clave"])[:80]
-        if saneada in previos:
-            r["pdf"], r["pdf_confianza"] = str(previos[saneada]), "alta"
-        elif k and k in indice_2025:
+        if k and k in indice_2025 and Path(indice_2025[k]) not in usados:
             r["pdf"], r["pdf_confianza"] = str(indice_2025[k]), "alta"
+            usados.add(Path(indice_2025[k]))
         else:
-            r["pdf"], r["pdf_confianza"] = None, ""
             pendientes.append(i)
 
     # 2) el resto, contra unc/ con asignacion uno a uno
@@ -385,6 +461,7 @@ def main():
         r["fecha_publicacion"] = ""
         r["evento_lugar"] = sede_crossref(r, cache)
         r["resumen"] = resumen_openalex(r, cache)
+        r["fecha_publicacion"] = fecha_crossref(r, cache) or r["fecha_publicacion"]
         if not r["fecha_publicacion"] and r["anio"]:
             r["fecha_publicacion"] = f"01/{r['anio']}"   # mes desconocido
             r["fecha_aproximada"] = True
@@ -396,6 +473,9 @@ def main():
             r["resumen"] = extraer_resumen(Path(r["pdf"]))
             r["resumen_fuente"] = "pdf" if r["resumen"] else ""
         fuentes[r["resumen_fuente"] or "sin"] += 1
+        # las del paper, si estan; si no, cargar.py las deriva del titulo
+        r["palabras_clave"] = (palabras_clave_pdf(Path(r["pdf"]))
+                               if r["pdf"] and r["pdf_confianza"] == "alta" else [])
     CACHE.write_text(json.dumps(cache, ensure_ascii=False, indent=1), encoding="utf-8")
     con_resumen = len(faltantes) - fuentes["sin"]
 
@@ -408,7 +488,7 @@ def main():
           f"  (openalex {fuentes['openalex']}, crossref {fuentes['crossref']},"
           f" pdf {fuentes['pdf']}, sin {fuentes['sin']})\n")
 
-    # los datos que completó Juan a mano pisan lo automático
+    # los datos completados a mano (datos-manuales.json) pisan lo automático
     manuales = AQUI / "datos-manuales.json"
     if manuales.exists():
         datos_m = json.loads(manuales.read_text(encoding="utf-8"))

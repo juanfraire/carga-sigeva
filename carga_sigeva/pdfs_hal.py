@@ -72,12 +72,16 @@ def url_en_openalex(reg: dict) -> str:
                   + urllib.parse.quote(reg["doi"]))
     except Exception:
         return ""
-    for clave in ("best_oa_location", "primary_location"):
-        loc = d.get(clave) or {}
-        for campo in ("pdf_url", "landing_page_url"):
-            u = loc.get(campo) or ""
-            if u.lower().endswith(".pdf"):
-                return u
+    # pdf_url no siempre termina en .pdf (arXiv: arxiv.org/pdf/2208.01234):
+    # se acepta igual, porque bajar() verifica que lo descargado sea un PDF
+    ubicaciones = [d.get("best_oa_location"), d.get("primary_location")]
+    ubicaciones += [loc for loc in d.get("locations") or [] if loc.get("is_oa")]
+    for loc in filter(None, ubicaciones):
+        if loc.get("pdf_url"):
+            return loc["pdf_url"]
+        u = loc.get("landing_page_url") or ""
+        if u.lower().endswith(".pdf"):
+            return u
     u = (d.get("open_access") or {}).get("oa_url") or ""
     return u if u.lower().endswith(".pdf") else ""
 
