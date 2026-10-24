@@ -277,14 +277,20 @@ def fecha_crossref(reg: dict, cache: dict) -> str:
     published-print, y si no en created (alta del DOI), que en IEEE coincide
     con la "Date of publication" del early access. Se toma la mas temprana
     que traiga mes.
+
+    Pero created puede ser muy posterior: las actas del IAC 2024 (Milan,
+    octubre) tienen published-print 2024 sin mes y created 2025-01-31. Una
+    fecha con mes de un año posterior al de otra fecha conocida se descarta.
     """
     if not reg.get("doi"):
         return ""
-    con_mes = [tuple(f[:2]) for f in _crossref(reg["doi"], cache)["fechas"]
-               if f and len(f) >= 2 and f[0] and f[1]]
+    fechas = [f for f in _crossref(reg["doi"], cache)["fechas"] if f and f[0]]
+    con_mes = [tuple(f[:2]) for f in fechas if len(f) >= 2 and f[1]]
     if not con_mes:
         return ""
     anio, mes = min(con_mes)
+    if anio > min(f[0] for f in fechas):
+        return ""
     return f"{mes:02d}/{anio}"
 
 
