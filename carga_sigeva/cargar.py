@@ -45,6 +45,10 @@ ROL_BANCO_DATOS = CFG.ROL_BANCO_DATOS     # id del rol en redirect(<id>)
 # SIGEVA se pone lento con el uso sostenido: conviene espaciar los altas
 PAUSA_ENTRE_REGISTROS = 4_000             # ms
 
+# el formulario lo dice ("Tamaño máximo del archivo 35 MegaBytes") pero no
+# lo valida con un mensaje: con un PDF mas grande guarda sin error y no queda
+MAX_PDF_MB = 35
+
 URL_LISTA = (f"{BASE}/eva/bcoProduccionListaPublicacion.do"
              "?idModulo=6&idGrupo=6&idMenu=1466&prod=cientifica")
 URL_NUEVO_ARTICULO = f"{BASE}/eva/bcoPrecargarArticulo.do?action=Nuevo"
@@ -98,6 +102,25 @@ def sinacentos(s: str) -> str:
     return "".join(c for c in s if not unicodedata.combining(c))
 
 
+def a_latin1(s: str) -> str:
+    """Lleva a ISO-8859-1 lo que no entra, sin tocar lo que si entra.
+
+    SIGEVA guarda los caracteres fuera de Latin-1 como entidad HTML y el PDF
+    del CV los imprime crudos: 'Güneş' saldria como 'G&#252;ne&#351;'. La
+    'ü' entra; la 'ş' pasa a 's'.
+    """
+    out = []
+    for c in s or "":
+        try:
+            c.encode("latin-1")
+            out.append(c)
+        except UnicodeEncodeError:
+            base = unicodedata.normalize("NFKD", c)
+            out.append("".join(b for b in base if not unicodedata.combining(b)
+                               and b.encode("latin-1", "ignore")) or "?")
+    return "".join(out)
+
+
 def idioma_de(reg: dict) -> str:
     t = reg["titulo"] + " " + reg["venue"]
     if re.search(r"\b(rencontres|francophones|j'ai|le |les |pour )", t, re.I):
@@ -108,7 +131,12 @@ def idioma_de(reg: dict) -> str:
 
 
 def palabras_clave(reg: dict, n: int = 4) -> list:
-    """Deriva palabras clave del titulo. El formulario las pide en MAYUSCULA."""
+    """Las del paper (emparejar.py las saca del PDF) o, si no hay, del titulo.
+
+    El formulario las pide en MAYUSCULA.
+    """
+    if reg.get("palabras_clave"):
+        return [a_latin1(k).upper() for k in reg["palabras_clave"][:n]]
     vacias = {"a", "an", "the", "of", "for", "in", "to", "and", "with", "on", "via",
               "from", "at", "by", "its", "toward", "towards", "using", "based",
               "into", "over", "under", "case", "study", "new", "novel", "approach"}
@@ -265,7 +293,7 @@ def asegurar_editorial(page, reg: dict) -> list:
 def limpiar_titulo(s: str) -> str:
     """Saca restos de LaTeX que el bib arrastra ($mu$D3TN -> muD3TN)."""
     s = re.sub(r"\$([^$]*)\$", r"\1", s)
-    return re.sub(r"\s{2,}", " ", s.replace("\\", "")).strip()
+    return a_latin1(re.sub(r"\s{2,}", " ", s.replace("\\", "")).strip())
 
 
 # --------------------------------------------------------------------- sesion
@@ -351,6 +379,80 @@ def rellenar_junto_a(page, etiqueta: str, valor: str) -> bool:
         }""", [etiqueta, valor])
 
 
+def fijar_fecha(page, campo: str, valor: str) -> bool:
+    """Escribe una fecha 'mm/aaaa' o 'aaaa' en un campo con datepicker.
+
+    Los campos de fecha son datepickers de jQuery UI cuyo onClose reescribe el
+    valor con la fecha que el widget tiene seleccionada. fill() cambia el texto
+    pero no esa seleccion, que queda en el mes actual: al perder el foco el
+    campo pasaba a mostrar la fecha de hoy. setDate fija las dos cosas.
+    """
+    partes = [int(p) for p in valor.split("/")]
+    anio, mes = partes[-1], (partes[0] if len(partes) == 2 else 1)
+    escrito = page.evaluate(
+        """([campo, anio, mes]) => {
+            const e = document.querySelector(`input[name="${campo}"]`);
+            if (!e) return null;
+            if (window.jQuery && jQuery(e).hasClass('hasDatepicker'))
+                jQuery(e).datepicker('setDate', new Date(anio, mes - 1, 1));
+            else
+                e.value = e.maxLength === 4 ? String(anio)
+                        : String(mes).padStart(2, '0') + '/' + anio;
+            return e.value;
+        }""", [campo, anio, mes])
+    return escrito == valor
+
+
+def fecha_evento_de(reg: dict) -> str:
+    """Fecha del evento en mm/aaaa.
+
+    Si no se conoce la sede se usa la de publicacion: para un paper de
+    congreso es del mismo año.
+    """
+    partes = (sede_evento(reg)["fecha"] or "").split("/")
+    fecha = "/".join(partes[1:]) if len(partes) == 3 else ""
+    return fecha or reg.get("fecha_publicacion") or f"01/{reg['anio']}"
+
+
+def reponer_fechas(page, reg: dict) -> list:
+    """Vuelve a escribir las fechas al final del llenado.
+
+    Cada vuelta por el buscador de revistas o de instituciones re-renderiza el
+    formulario y los datepicker arrancan otra vez en la fecha de hoy, asi que
+    las fechas se escriben despues de los autores y se verifican.
+    """
+    if reg["tipo"] == "articulo":
+        fechas = {"fechaPublica": reg.get("fecha_publicacion") or ""}
+    else:
+        fechas = {"anioPublica": str(reg["anio"]), "fechaReunion": fecha_evento_de(reg)}
+    avisos = []
+    for campo, valor in fechas.items():
+        if valor and page.locator(f'input[name="{campo}"]').count() \
+                and not fijar_fecha(page, campo, valor):
+            avisos.append(f"no pude fijar {campo} en {valor}")
+    return avisos
+
+
+def mostrar_todos_los_autores(page) -> None:
+    """Despliega la tabla de autores completa.
+
+    En articulos, cada vez que el formulario vuelve del buscador de
+    instituciones la tabla muestra solo algunos autores y un boton
+    "Ver más (4/8)". El Buscar de una fila oculta no se puede clickear.
+    """
+    botones = page.locator('input[name="btnSubmitBuscar"]')
+    for _ in range(10):
+        if all(botones.nth(i).is_visible() for i in range(botones.count())):
+            return
+        # por texto y no por tag: el control no es un <button> ni un <input>
+        ver_mas = page.get_by_text(re.compile(r"Ver m[aá]s"))
+        visibles = [i for i in range(ver_mas.count()) if ver_mas.nth(i).is_visible()]
+        if not visibles:
+            return
+        ver_mas.nth(visibles[0]).click()
+        page.wait_for_timeout(400)
+
+
 def completar_comunes(page, reg: dict, con_adjunto: bool) -> list:
     """Campos que comparten los dos formularios. Devuelve avisos."""
     avisos = []
@@ -364,7 +466,7 @@ def completar_comunes(page, reg: dict, con_adjunto: bool) -> list:
 
     resumen = reg.get("resumen") or ""
     if resumen:
-        page.fill('textarea[name="hdnresumen"]', resumen)
+        page.fill('textarea[name="hdnresumen"]', a_latin1(resumen))
     else:
         # SIGEVA lo exige, asi que sin resumen el guardado va a fallar igual
         raise RuntimeError("sin resumen (SIGEVA lo exige); conseguirlo primero")
@@ -372,9 +474,14 @@ def completar_comunes(page, reg: dict, con_adjunto: bool) -> list:
     # campo_0_0 lo puebla JavaScript al cambiar campo_0, y despues del flujo de
     # instituciones puede tardar: se espera a que aparezca la opcion buscada
     page.select_option('select[name="campo_0"]', AREA_CONOCIMIENTO[0])
+    subcampo = AREA_CONOCIMIENTO[1]
     for intento in range(6):
         page.wait_for_timeout(500)
-        if _elegir(page, 'select[name="campo_0_0"]', AREA_CONOCIMIENTO[1]):
+        # config.json admite el value del combo o un trozo de su etiqueta: los
+        # subcampos llegan por AJAX y su value no figura en el HTML inicial
+        valor = subcampo if subcampo.isdigit() else _opcion_por_texto(
+            page, 'select[name="campo_0_0"]', re.escape(subcampo))
+        if valor and _elegir(page, 'select[name="campo_0_0"]', valor):
             break
     else:
         avisos.append("no pude fijar el área del conocimiento")
@@ -384,6 +491,12 @@ def completar_comunes(page, reg: dict, con_adjunto: bool) -> list:
         campos.nth(i).fill(palabra)
 
     if con_adjunto and reg.get("pdf") and Path(reg["pdf"]).exists():
+        mb = Path(reg["pdf"]).stat().st_size / 2**20
+        if mb > MAX_PDF_MB:
+            raise RuntimeError(
+                f"el PDF pesa {mb:.0f} MB y SIGEVA acepta hasta {MAX_PDF_MB}. "
+                "Comprimirlo, por ejemplo: gs -sDEVICE=pdfwrite "
+                "-dPDFSETTINGS=/printer -o chico.pdf grande.pdf")
         page.set_input_files('input[name="theFile"]', reg["pdf"])
         # el Instructivo recomienda el Post-Print (version aceptada); si no
         # esta en la lista se usa la primera opcion real
@@ -466,7 +579,7 @@ def cargar_articulo(page, reg: dict) -> list:
     campo_fecha = page.locator('input[name="fechaPublica"]')
     if campo_fecha.count() and not campo_fecha.first.input_value().strip():
         if reg.get("fecha_publicacion"):
-            campo_fecha.first.fill(reg["fecha_publicacion"])
+            fijar_fecha(page, "fechaPublica", reg["fecha_publicacion"])
             if reg.get("fecha_aproximada"):
                 avisos.append("mes de publicación estimado")
         else:
@@ -593,10 +706,22 @@ def asignar_institucion(page, fila: int, autor: dict) -> str:
     # SIGEVA exige al menos 3 caracteres en el campo de la fila antes de
     # abrir el buscador; si se aprieta Buscar vacio contesta "El texto a buscar
     # tiene menos de 3 caracteres" y la pantalla nunca se abre.
+    mostrar_todos_los_autores(page)
     campo = page.locator('input[name="autorOrganizacionBuscar"]')
-    if fila < campo.count():
-        campo.nth(fila).fill(nombre_inst[:60])
-    page.locator('input[name="btnSubmitBuscar"]').nth(fila).click()
+    boton = page.locator('input[name="btnSubmitBuscar"]').nth(fila)
+    if boton.is_visible():
+        if fila < campo.count():
+            campo.nth(fila).fill(nombre_inst[:60])
+        boton.click()
+    else:
+        # la fila sigue oculta: el click de Playwright esperaria a que se vea.
+        # Desde JavaScript el handler corre igual.
+        page.evaluate(
+            """([fila, texto]) => {
+                const c = document.getElementsByName('autorOrganizacionBuscar')[fila];
+                if (c) c.value = texto;
+                document.getElementsByName('btnSubmitBuscar')[fila].click();
+            }""", [fila, nombre_inst[:60]])
     page.wait_for_selector('select[name="filtroPais"]', state="attached", timeout=60_000)
 
     # La busqueda valida tres cosas y avisa con mensajes propios:
@@ -743,7 +868,7 @@ def falta_en_catalogo(reg: dict, cat) -> bool:
 
 
 def cargar_autores(page, reg: dict) -> list:
-    """Carga los autores en orden y marca a Juan como declarante.
+    """Carga los autores en orden y marca al declarante (config.json: apellido).
 
     La institucion de cada coautor se deja vacia a proposito: el buscador anda
     mal y no hace falta.
@@ -761,7 +886,7 @@ def cargar_autores(page, reg: dict) -> list:
     for i, autor in enumerate(reg["autores"]):
         if i >= filas.count():
             break
-        filas.nth(i).fill(f"{autor['apellido']}, {autor['nombre']}".strip(", "))
+        filas.nth(i).fill(a_latin1(f"{autor['apellido']}, {autor['nombre']}".strip(", ")))
         if CFG.es_declarante(autor["apellido"]):
             propio = i
     if len(reg["autores"]) > filas.count():
@@ -772,9 +897,9 @@ def cargar_autores(page, reg: dict) -> list:
         if propio < radios.count():
             radios.nth(propio).check()
     else:
-        avisos.append("no encontré a Fraire entre los autores")
+        avisos.append(f"no encontré a {CFG.CONF['apellido']} entre los autores")
 
-    # institucion de cada autor: SIGEVA la exige para todos. La de Juan la
+    # institucion de cada autor: SIGEVA la exige para todos. La del declarante la
     # completa el sistema solo, asi que se saltea.
     sin_dato = 0
     for i, autor in enumerate(reg["autores"]):
@@ -788,6 +913,9 @@ def cargar_autores(page, reg: dict) -> list:
             try:
                 page.screenshot(path=str(CAPTURAS / "institucion-atascada.png"),
                                 full_page=True)
+                # el HTML dice mas que la captura: filas ocultas, controles
+                (CAPTURAS / f"institucion-atascada-{reg['clave'][:30]}.html") \
+                    .write_text(page.content(), encoding="utf-8")
             except Exception:
                 pass
             # sin volver al formulario no se puede seguir con este registro
@@ -805,7 +933,39 @@ def aparece_en_lista(page, reg: dict) -> bool:
     SIGEVA puede volver del Guardar sin mensaje de error y sin haber guardado
     nada, asi que el unico criterio confiable es encontrarlo en la lista. Se
     compara por prefijo normalizado porque la lista trunca los titulos.
+
+    Despues del Guardar la pagina puede seguir navegando (popup de upload,
+    redirect) y eso destruye el contexto en medio del evaluate: se espera a
+    que asiente y se reintenta.
     """
+    for intento in range(5):
+        try:
+            page.wait_for_load_state("load", timeout=45_000)
+            return _buscar_en_lista(page, reg)
+        except Exception as e:
+            if "context was destroyed" not in str(e) or intento == 4:
+                raise
+            log("    la página seguía navegando, reintento la verificación")
+            page.wait_for_timeout(4_000)
+    return False
+
+
+def confirmar_guardado(page, reg: dict, intentos: int = 6) -> bool:
+    """aparece_en_lista con paciencia, para usar despues de Guardar.
+
+    Con PDF grandes la subida sigue en curso cuando la pagina ya volvio a la
+    lista: el registro aparece segundos despues. Darlo por no guardado en ese
+    momento invitaba a reintentar y duplicar.
+    """
+    for i in range(intentos):
+        if aparece_en_lista(page, reg):
+            return True
+        if i < intentos - 1:
+            page.wait_for_timeout(10_000)
+    return False
+
+
+def _buscar_en_lista(page, reg: dict) -> bool:
     clave = re.sub(r"[^a-z0-9]", "", sinacentos(limpiar_titulo(reg["titulo"])))[:40]
     if not clave:
         return False
@@ -854,7 +1014,7 @@ def inyectar_autores(page, reg: dict, cat, en_tbody: bool = True) -> list:
         a = {**a, "institucion": cruda}
         inst = cat.institucion(cruda)
         datos.append({
-            "nombre": f"{a['apellido']}, {a['nombre']}".strip(", "),
+            "nombre": a_latin1(f"{a['apellido']}, {a['nombre']}".strip(", ")),
             "propio": CFG.es_declarante(a["apellido"]),
             "label": (inst or {}).get("label") or (a.get("institucion") or "").strip(),
             "id": (inst or {}).get("id", ""),
@@ -924,7 +1084,7 @@ def inyectar_autores(page, reg: dict, cat, en_tbody: bool = True) -> list:
         }""", [datos, TIPO_INTERNACIONAL, en_tbody])
 
     if resultado["declarante"] < 0:
-        avisos.append("no encontré a Fraire entre los autores")
+        avisos.append(f"no encontré a {CFG.CONF['apellido']} entre los autores")
     if resultado["filas"] < len(datos):
         avisos.append(f"entraron {resultado['filas']} de {len(datos)} autores")
     if sin_catalogo:
@@ -1004,7 +1164,7 @@ def cargar_articulo_manual(page, reg: dict) -> list:
         page.fill('input[name="paginaInicial"]', paginas.group(1))
         page.fill('input[name="paginaFinal"]', paginas.group(2))
     if reg.get("fecha_publicacion"):
-        page.fill('input[name="fechaPublica"]', reg["fecha_publicacion"])
+        fijar_fecha(page, "fechaPublica", reg["fecha_publicacion"])
         if reg.get("fecha_aproximada"):
             avisos.append("mes de publicación estimado")
     else:
@@ -1026,6 +1186,7 @@ def cargar_articulo_manual(page, reg: dict) -> list:
         avisos += inyectar_autores(page, reg, cat, en_tbody=True)
     avisos += fijar_soporte(page, reg)
     avisos += completar_comunes(page, reg, con_adjunto=True)
+    avisos += reponer_fechas(page, reg)
     return avisos
 
 
@@ -1047,19 +1208,14 @@ def cargar_evento(page, reg: dict) -> list:
     page.fill('input[name="lugarPublicacion"]', sede["ciudad"])
     editorial, _ = editorial_y_pais(reg)
     page.fill('input[name="editorial"]', editorial or reg.get("editorial") or "")
-    page.fill('input[name="anioPublica"]', str(reg["anio"]))
+    fijar_fecha(page, "anioPublica", str(reg["anio"]))
     evento = re.split(r",\s*\d{1,2}\s+\w+\s+\d{4}", reg["venue"])[0]
     page.fill('input[name="reunionCientifica"]', evento[:250])
     page.select_option('select[name="tipoReunion"]', label=tipo_reunion_de(reg))
     page.check('input[name="alcanceInternacional"]')
     page.select_option('select[name="paisEvento"]', label=sede["pais"])
     page.fill('input[name="lugarReunion"]', sede["ciudad"])
-    # el campo pide mm/aaaa. Si el booktitle no trae fecha se usa la de
-    # publicacion: para un paper de congreso es del mismo año.
-    partes = (sede["fecha"] or "").split("/")
-    fecha_ev = "/".join(partes[1:]) if len(partes) == 3 else ""
-    fecha_ev = fecha_ev or reg.get("fecha_publicacion") or f"01/{reg['anio']}"
-    page.fill('input[name="fechaReunion"]', fecha_ev)
+    fijar_fecha(page, "fechaReunion", fecha_evento_de(reg))     # mm/aaaa
 
     # el soporte es obligatorio, y si se marca "electronico" SIGEVA exige la URL
     enlace = reg.get("url") or (f"https://doi.org/{reg['doi']}" if reg.get("doi") else "")
@@ -1073,9 +1229,17 @@ def cargar_evento(page, reg: dict) -> list:
             soportes.nth(0).check()                      # impreso, sin URL que dar
 
     avisos = asegurar_editorial(page, reg)
-    avisos += inyectar_autores(page, reg, Catalogo(), en_tbody=False)
+    cat = Catalogo()
+    if falta_en_catalogo(reg, cat):
+        # igual que en articulos: inyectar una "otra" sin ID no persiste, hay
+        # que pasar por el alta real para que SIGEVA cree la institucion
+        avisos.append("instituciones nuevas: uso el alta real (más lento)")
+        avisos += cargar_autores(page, reg)
+    else:
+        avisos += inyectar_autores(page, reg, cat, en_tbody=False)
     avisos += fijar_soporte(page, reg)
     avisos += completar_comunes(page, reg, con_adjunto=True)
+    avisos += reponer_fechas(page, reg)
     return avisos
 
 
@@ -1151,6 +1315,13 @@ def main():
                 if not sesion_viva(page):
                     registrar({"clave": reg["clave"], "resultado": "sesion-expirada"})
                     break
+            # estado.json solo sabe lo que cargo este script: antes de crear se
+            # mira la lista en vivo, por si el registro entro por otro lado
+            if not a.dry_run and aparece_en_lista(page, reg):
+                log("    ya está en SIGEVA: no lo vuelvo a cargar")
+                registrar({"clave": reg["clave"], "titulo": reg["titulo"],
+                           "resultado": "ya-estaba"})
+                continue
             try:
                 if reg["tipo"] != "articulo":
                     avisos = cargar_evento(page, reg)
@@ -1231,15 +1402,8 @@ def main():
                 log("    re-adjuntando el archivo y reintentando")
                 try:
                     page.set_input_files('input[name="theFile"]', reg["pdf"])
-                    # el re-render tambien vacia las fechas: hay que reponerlas
-                    fechas = {"fechaPublica": reg.get("fecha_publicacion", "")}
-                    s = sede_evento(reg)
-                    if s["fecha"]:
-                        fechas["fechaReunion"] = "/".join(s["fecha"].split("/")[1:])
-                    for campo, valor in fechas.items():
-                        loc = page.locator(f'input[name="{campo}"]')
-                        if valor and loc.count() and not loc.first.input_value().strip():
-                            loc.first.fill(valor)
+                    # el re-render tambien pisa las fechas: hay que reponerlas
+                    reponer_fechas(page, reg)
                     page.click('input[type="submit"][value="Guardar"]')
                     page.wait_for_load_state("networkidle", timeout=45_000)
                 except Exception:
@@ -1259,7 +1423,7 @@ def main():
             # No alcanza con "no hubo mensaje de error": esto es una declaracion
             # jurada y un 'guardado' falso haria que el registro se saltee para
             # siempre. Se confirma yendo a buscarlo a la lista.
-            if not aparece_en_lista(page, reg):
+            if not confirmar_guardado(page, reg):
                 log("    NO QUEDÓ GUARDADO (no aparece en la lista)")
                 page.screenshot(path=str(CAPTURAS / f"no-guardo-{reg['clave'][:36].replace('/', '_')}.png"),
                                 full_page=True)
@@ -1276,6 +1440,14 @@ def main():
             log("    guardado y verificado en la lista")
 
         log(f"Listo. {ok} ok, {fallos} con problemas. Detalle en estado.json")
+        if not a.dry_run:
+            # foto final de lo que quedo, en la misma sesion: sirve de control
+            # y deja inventario.json al dia para el proximo diff
+            try:
+                import inventariar
+                inventariar.actualizar(page)
+            except Exception as e:
+                log(f"No pude releer la lista: {str(e).splitlines()[0][:100]}")
         ctx.close()
 
 
