@@ -169,11 +169,20 @@ def resumen_crossref(doi: str, cache: dict) -> str:
     return crudo
 
 
-def clave_apellido(nombre: str) -> str:
-    """Ultima palabra significativa del nombre, normalizada, para cruzar autores."""
-    # el guion tambien separa: "Karabulut-Kurt" y "Karabulut Kurt" son el mismo
-    partes = [p for p in re.split(r"[\s,\-]+", sinacentos(nombre)) if len(p) > 1]
-    return re.sub(r"[^a-z]", "", partes[-1]) if partes else ""
+def claves_apellido(nombre: str) -> list:
+    """Claves para cruzar autores: el apellido entero sin guiones y su ultimo tramo.
+
+    Hacen falta las dos. "Karabulut-Kurt" (OpenAlex) y "Karabulut Kurt" (.bib)
+    cruzan por el tramo; "Abu-Shaar" y "Abushaar", por el apellido entero. Las
+    rayas cuentan como guion: OpenAlex escribe "Galán–Jiménez".
+    """
+    s = re.sub(r"[‐‑‒–—]", "-", sinacentos(nombre))
+    palabras = [p for p in re.split(r"[\s,]+", s) if len(p) > 1]
+    if not palabras:
+        return []
+    entero = re.sub(r"[^a-z]", "", palabras[-1])
+    tramo = re.sub(r"[^a-z]", "", palabras[-1].split("-")[-1])
+    return list(dict.fromkeys(k for k in (entero, tramo) if k))
 
 
 PAIS_EN_TEXTO = {
@@ -224,9 +233,13 @@ def aplicar_afiliaciones(reg: dict, afiliaciones: dict) -> None:
     normalizacion (paso con la i turca de "Yanıkömeroğlu"), un cache viejo
     seguia sin cruzar.
     """
-    por_apellido = {clave_apellido(k): v for k, v in afiliaciones.items()}
+    por_apellido = {}
+    for k, v in afiliaciones.items():
+        for c in claves_apellido(k):
+            por_apellido.setdefault(c, v)
     for a in reg.get("autores", []):
-        d = por_apellido.get(clave_apellido(a["apellido"])) or {}
+        d = next((por_apellido[c] for c in claves_apellido(a["apellido"])
+                  if c in por_apellido), {})
         crudo = d.get("institucion", "")
         a["institucion"] = limpiar_institucion(crudo)
         a["pais_institucion"] = d.get("pais", "") or pais_del_texto(crudo)
@@ -412,6 +425,11 @@ def palabras_clave_pdf(pdf: Path) -> list:
     out = []
     for k in re.split(r"[,;]", m.group(1)):
         k = re.sub(r"\s+", " ", limpiar_texto(k)).strip(" .")
+        # marcas de nota al pie ("AI infrastructure ∗") y letras que pdftotext
+        # separa con espacios ("L O R A")
+        k = re.sub(r"\s*[∗*†‡]+$", "", k)
+        k = re.sub(r"\b(?:[A-Za-z] ){2,}[A-Za-z]\b",
+                   lambda m: m.group(0).replace(" ", ""), k)
         if not k or re.search(r"[\d\[\]]", k) or len(k.split()) > 5:
             break
         out.append(k)
