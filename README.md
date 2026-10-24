@@ -165,7 +165,9 @@ pena mirar si tu caso de uso es otro.
 **El límite:** sólo funciona con instituciones que ya tienen ID en el catálogo.
 Inyectar `autorisOtraOrganizacion=true` con ID vacío hace que el backend
 explote con `TransientPropertyValueException`, porque intenta persistir la
-filiación contra una organización que no existe. Y una institución nueva se
+filiación contra una organización que no existe. Lo mismo pasa con una "otra
+organización" que alguien ya dio de alta si se la manda con `false`: hay que
+mandarla con su ID y `true`, y SIGEVA guarda una copia con un ID nuevo. Y una institución nueva se
 persiste **sólo cuando se guarda un registro que la usa**, lo que crea un
 círculo: para guardar necesitás la institución, para crear la institución
 necesitás guardar. La salida es cargar ese registro a mano una vez; después

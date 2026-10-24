@@ -137,6 +137,17 @@ de esa tabla: una filiación insertada ahí, o después de la fila del autor, se
 en pantalla pero no viaja. En eventos el `<tbody>` puede no existir; se crea.
 
 Sólo sirve con `autorOrganizacionId` real. Ver el límite en el README.
+`autorisOtraOrganizacion` tiene que coincidir con lo que es esa organización:
+`false` para las del catálogo oficial y `true` para las "otra" que dio de alta
+algún usuario (las dos tienen ID). Con el valor cruzado el guardado cae con
+`TransientPropertyValueException` y no queda nada. Cada vez que se guarda una
+"otra", SIGEVA la copia con un ID nuevo: el mismo registro puede tener dos
+`INSA LYON` con IDs distintos. Para verificar después de guardar, las "otra"
+se comparan por nombre.
+
+En el formulario de eventos suele quedar una fila de autor vacía al final,
+también en registros cargados a mano. No se serializa como autor y no hay que
+tocarla.
 
 ## Modificar crea una versión nueva
 
@@ -268,7 +279,9 @@ reintentar durante un minuto. El `evaluate` también puede caer con
 *Execution context was destroyed* si la página sigue navegando.
 
 En la lista de trabajos en eventos los títulos se cortan a 50 caracteres y
-terminan en `...`.
+terminan en `...`. La columna *Año* de esa lista es la de la reunión
+(`fechaReunion`), no la de las actas (`anioPublica`): WiSEE 2024, en 12/2024 y
+con actas de 2025, figura como 2024.
 
 ## Redes, gestión editorial y eventos
 

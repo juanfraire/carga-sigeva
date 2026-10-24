@@ -392,11 +392,14 @@ def fechas_de(page, reg: dict) -> dict:
 def anio_esperado(reg: dict) -> int:
     """Año que la lista de SIGEVA debe mostrar despues de guardar.
 
-    En articulos sale de la fecha de publicacion; en eventos, del año de
-    publicacion de las actas.
+    En articulos sale de la fecha de publicacion. En eventos la lista muestra
+    el año de la reunion, no el de las actas: WiSEE 2024 (12/2024, actas
+    2025) figura como 2024.
     """
     if reg["tipo"] == "articulo" and reg.get("fecha_publicacion"):
         return int(reg["fecha_publicacion"].split("/")[-1])
+    if reg["tipo"] != "articulo":
+        return int(fecha_evento_de(reg).split("/")[-1])
     return int(reg["anio"])
 
 
@@ -1139,6 +1142,12 @@ def inyectar_autores(page, reg: dict, cat) -> list:
 
     Si la institucion esta en el catalogo se usa su ID; si no, se carga como
     "otra organizacion" con el nombre real. Nunca se inventa una institucion.
+
+    El catalogo tambien tiene "otras" que alguien ya dio de alta (otra: true).
+    Van con su ID y autorisOtraOrganizacion=true: con false el backend las
+    busca entre las oficiales, no las encuentra y falla con
+    TransientPropertyValueException. Al guardar, SIGEVA hace una copia con un
+    ID nuevo.
     """
     avisos = []
     from catalogo import BASURA
@@ -1158,6 +1167,7 @@ def inyectar_autores(page, reg: dict, cat) -> list:
             "propio": CFG.es_declarante(a["apellido"]),
             "label": (inst or {}).get("label") or (a.get("institucion") or "").strip(),
             "id": (inst or {}).get("id", ""),
+            "otra": bool((inst or {}).get("otra")),
             "paisId": "",
         })
 
@@ -1188,7 +1198,7 @@ def inyectar_autores(page, reg: dict, cat) -> list:
                 const tabla = campos[i].closest('table');
                 if (!tabla) return;
                 const cuerpo = tabla.tBodies[0] || tabla.appendChild(document.createElement('tbody'));
-                const esOtra = a.id ? 'false' : 'true';
+                const esOtra = (a.otra || !a.id) ? 'true' : 'false';
                 cuerpo.insertAdjacentHTML('beforeend', `
                     <tr class="odd"><td colspan="2"><div>${a.label}</div>
                     ${oculto('autorOrganizacionLabel', a.label)}
