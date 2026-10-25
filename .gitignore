@@ -8,3 +8,5 @@ pdfs/
 __pycache__/
 PENDIENTES.md
 FICHA-CARGA-MANUAL.md
+# CV exportados desde SIGEVA (datos personales)
+cv-sigeva-*.pdf

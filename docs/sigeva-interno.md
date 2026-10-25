@@ -88,6 +88,18 @@ Formulario `cProduccionArticuloActionForm`.
 `campo_0_0` se llena por JavaScript al cambiar `campo_0`; hay que esperar a que
 aparezca la opción antes de seleccionarla.
 
+Por *Omitir*, casi todos los campos están dos veces con el mismo `name`: el
+visible y un hidden. Se escribe el visible; las fechas, los dos.
+
+Una revista que no está en el catálogo se da de alta como "otra" con
+`botrarevista`, `botroissn`, `botroeissn` y el radio `otraRevistaSeleccionada`,
+y después *Seleccionar*. Ese bloque aparece recién en la pantalla de resultados
+de una búsqueda (por ISSN, por ejemplo), no en el formulario inicial. Así entró
+CEAS Space Journal en octubre de 2026.
+
+`tipoAdjunto` sólo ofrece *Post print* y *Versión final*: un preprint no se puede
+declarar. El formulario de evento no tiene ese combo.
+
 ## Campos del formulario de evento
 
 Formulario `cProduccionCongresoActionForm`. Comparte `idioma`, `hdnresumen`,
@@ -161,6 +173,34 @@ El botón de guardar del formulario de edición es `Modificar`. Un `fetch` con e
 `FormData` del formulario vuelve al formulario sin guardar; el `click()` del
 botón desde la página sí guarda.
 
+Pasa lo mismo fuera de las producciones (14.11.24.6): redes
+(`bcoActividadRedes.do`), membresías, premios (`bcoPremio.do`), participación en
+eventos (`bcoParticipacionEvento.do`), proyectos
+(`bcofinanciamientoCYTProyecto.do`) y desarrollos. Cada `Modificar` da un
+`actividadId` o `id` nuevo. Reabrir el id viejo para "ver si guardó" muestra los
+datos de antes, y un segundo `Modificar` desde ahí deja dos copias. Así quedaron
+tres CCSDS en octubre de 2026. La verificación es: ids de la lista antes y
+después, el único id nuevo, y sus campos.
+
+Al modificar registros viejos, SIGEVA pide cosas que no pedía cuando se
+cargaron, y el formulario vuelve con el error sin guardar nada:
+
+- *"Debe seleccionar su nombre de la lista de autores"*: marcar al declarante
+  (`autorSel` de su fila y `autorPersonaId`).
+- *"Debe especificar el tipo de versión del archivo adjunto"*: `tipoAdjunto`.
+- *"Debe adjuntar el archivo con el full text"* (desarrollos sin PDF): sin un
+  archivo no hay forma de guardar.
+
+**Borrar de a uno.** Con varias pantallas de `action=Borrar` abiertas en pestañas,
+*Eliminar* vuelve a la lista sin borrar nada y sin mensaje. Lo más probable es el
+token de Struts: hay uno solo por sesión y cada pantalla que se carga lo
+reemplaza. Hay que recargar la pestaña justo antes de apretar *Eliminar*.
+
+Los artículos importados por la precarga (`camposImportadosJSON`) no tienen
+`lugarEdicion` en el formulario: el ".null" que el CV imprime ahí no se puede
+corregir. También repiten `pais` como hidden con el id del país (21 = Estados
+Unidos); al verificar, manda el combo.
+
 ## Buscador de instituciones
 
 Se llega con el botón `btnSubmitBuscar` de la fila del autor, que corre
@@ -202,6 +242,35 @@ universidad**: para una universidad extranjera la menos incorrecta es
 
 El catálogo es casi exclusivamente argentino, aunque tiene entradas extranjeras
 cargadas por otros usuarios.
+
+El buscador sólo devuelve instituciones oficiales del catálogo. Las "otra" que
+alguien dio de alta (INSA LYON, i2CAT, JET PROPULSION LABORATORY) no aparecen
+nunca: su id se saca de un registro ya guardado, leyendo su `autorJSON`. Cada
+resultado es un `span.orgBuscar` con `navegar('08434')`; el id de la
+organización es ese número sin los ceros a la izquierda (8434 = UPC).
+
+**Alta con "Ingresar otra" desde un formulario nuevo** (probado en octubre de
+2026, también con el formulario dentro de un iframe): la fila del autor vuelve
+con `autorOrganizacionId` = 0, `autorisOtraOrganizacion` = true, y
+`autorPaisId` y `autorTipoId` del alta. El nombre queda en mayúsculas. SIGEVA le
+asigna un id real recién al guardar el registro. El formulario conserva los
+nombres de los autores escritos antes de apretar *Buscar*. Funciona igual desde
+el formulario de edición (*Modificar*).
+
+**Cuidado con lo que se escribe antes de *Buscar*.** Si el texto coincide con
+alguna institución, la pantalla entra sola en esa rama, y el bloque de alta
+pasa a crear una sub-unidad: con "Southeast University" quedó como "Nivel 4"
+debajo de un laboratorio de Auburn University. En ese estado
+`tipoOtraOrganizacion` es un hidden y hay varias filas "Nivel N". Para un alta
+conviene buscar un texto que no coincida con nada y comprobar, antes de
+*Ingresar otra*, que haya un solo "Nivel 1" y que el tipo sea un combo. China
+tiene provincias en el combo (Jiangsu = 2408), como Argentina.
+
+**Filiaciones que nadie pidió.** Al volver de un alta, el declarante puede
+aparecer con filiaciones de un registro guardado antes en la misma sesión,
+entre ellas una "otra" sin id, que hace caer el guardado. Antes de guardar hay
+que dejar en cada autor sólo lo que corresponde y comparar el `autorJSON`
+armado con lo esperado.
 
 ## Fechas: el datepicker pisa lo que escribís
 
@@ -277,6 +346,10 @@ que termine la subida, y el registro aparece segundos después. Buscarlo en ese
 momento da un falso "no guardado", y reintentar lo duplica. Hay que esperar y
 reintentar durante un minuto. El `evaluate` también puede caer con
 *Execution context was destroyed* si la página sigue navegando.
+
+El resumen no viene en un campo del formulario de edición: lo escribe un
+`writeRichText('resumen', '...')` dentro de un `<script>`, así que hay que
+sacarlo de ahí para compararlo. SIGEVA guarda el apóstrofo `'` como `´`.
 
 En la lista de trabajos en eventos los títulos se cortan a 50 caracteres y
 terminan en `...`. La columna *Año* de esa lista es la de la reunión
